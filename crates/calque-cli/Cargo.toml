@@ -1,0 +1,23 @@
+[package]
+name = "calque-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "calque"
+path = "src/main.rs"
+
+[dependencies]
+calque-model = { workspace = true }
+calque-space = { workspace = true }
+calque-engine = { workspace = true }
+calque-policy = { workspace = true }
+calque-parse = { workspace = true }
+calque-vendors = { workspace = true }
+calque-report = { workspace = true }
+clap = { workspace = true }
+miette = { workspace = true }
+serde = { workspace = true }
+serde_yaml = { workspace = true }
+serde_json = { workspace = true }

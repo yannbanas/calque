@@ -1,0 +1,39 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/calque-model",
+    "crates/calque-space",
+    "crates/calque-engine",
+    "crates/calque-policy",
+    "crates/calque-diff",
+    "crates/calque-parse",
+    "crates/calque-vendors",
+    "crates/calque-report",
+    "crates/calque-cli",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+
+[workspace.dependencies]
+calque-model = { path = "crates/calque-model" }
+calque-space = { path = "crates/calque-space" }
+calque-engine = { path = "crates/calque-engine" }
+calque-policy = { path = "crates/calque-policy" }
+calque-diff = { path = "crates/calque-diff" }
+calque-parse = { path = "crates/calque-parse" }
+calque-vendors = { path = "crates/calque-vendors" }
+calque-report = { path = "crates/calque-report" }
+
+ipnet = { version = "2", features = ["serde"] }
+serde = { version = "1", features = ["derive"] }
+serde_yaml = "0.9"
+serde_json = "1"
+clap = { version = "4", features = ["derive"] }
+miette = { version = "7", features = ["fancy"] }
+thiserror = "2"
+petgraph = "0.6"
+proptest = "1"
+insta = "1"

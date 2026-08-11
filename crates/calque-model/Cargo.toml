@@ -1,0 +1,10 @@
+[package]
+name = "calque-model"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Représentation intermédiaire de Calque — crate PUR (serde + ipnet uniquement)"
+
+[dependencies]
+ipnet = { workspace = true }
+serde = { workspace = true }

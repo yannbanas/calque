@@ -1,0 +1,11 @@
+[package]
+name = "calque-engine"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+calque-model = { workspace = true }
+calque-space = { workspace = true }
+ipnet = { workspace = true }
+serde = { workspace = true }

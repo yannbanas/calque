@@ -1,0 +1,11 @@
+[package]
+name = "calque-report"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+calque-model = { workspace = true }
+calque-engine = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
