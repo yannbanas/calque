@@ -16,3 +16,9 @@ pub mod backend;
 pub mod cli;
 pub mod commands;
 pub mod project;
+
+/// Les commandes de la collecte en ligne (S7) et de la confrontation au
+/// réel (§11.2). Derrière la feature `collect`, DÉSACTIVÉE par défaut :
+/// l'analyse hors ligne ne compile pas la pile SSH (§8).
+#[cfg(feature = "collect")]
+pub mod collect_cmd;

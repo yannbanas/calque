@@ -460,6 +460,8 @@ impl Converter {
                 continue;
             };
             let mut is_range = false;
+            let mut is_iface_subnet = false;
+            let mut iface_ref: Option<String> = None;
             let mut subnet: Option<ipnet::IpNet> = None;
             let mut start_ip: Option<Ipv4Addr> = None;
             let mut end_ip: Option<Ipv4Addr> = None;
@@ -494,6 +496,12 @@ impl Converter {
                     Some("type") => match d.arg(1) {
                         Some("subnet" | "ipmask") => {}
                         Some("iprange") => is_range = true,
+                        // « Le sous-réseau de l'interface » : FortiOS crée
+                        // ces objets automatiquement (`lan address`…). Le
+                        // sous-réseau est en général exporté (`set subnet`),
+                        // sinon il se déduit des adresses de l'interface —
+                        // déjà dans le modèle, rien n'est deviné.
+                        Some("interface-subnet") => is_iface_subnet = true,
                         // fqdn, geography, wildcard… : irrésolubles hors
                         // ligne, on ne devine pas.
                         other => {
@@ -527,6 +535,8 @@ impl Converter {
                             broken = true;
                         }
                     },
+                    // L'interface de référence d'un objet interface-subnet.
+                    Some("interface") => iface_ref = d.arg(1).map(str::to_owned),
                     // Reconnus, sans effet sur l'accessibilité.
                     Some(
                         "comment" | "color" | "uuid" | "associated-interface" | "allow-routing",
@@ -570,6 +580,27 @@ impl Converter {
             } else {
                 match subnet {
                     Some(net) => AddrObject::Nets(vec![net]),
+                    // interface-subnet sans `set subnet` exporté : les
+                    // adresses de l'interface (déjà converties, première
+                    // passe) donnent le réseau exact.
+                    None if is_iface_subnet => {
+                        let nets: Vec<ipnet::IpNet> = iface_ref
+                            .as_deref()
+                            .and_then(|ifn| self.device.interfaces.get(&IfaceId::new(ifn)))
+                            .map(|itf| itf.addrs.iter().map(|a| a.trunc()).collect())
+                            .unwrap_or_default();
+                        if nets.is_empty() {
+                            self.unsupported(
+                                format!(
+                                    "objet `{name}` de type interface-subnet sans sous-réseau \
+                                     déductible (interface absente ou sans adresse)"
+                                ),
+                                &edit.span,
+                            );
+                            continue;
+                        }
+                        AddrObject::Nets(nets)
+                    }
                     None => {
                         self.unsupported(
                             format!("objet adresse `{name}` sans `set subnet`"),
@@ -1227,5 +1258,54 @@ mod tests {
         assert!(unsupported
             .iter()
             .any(|d| d.message.contains("SRV") && d.message.contains("redéfini")));
+    }
+
+    /// Les objets auto-créés `type interface-subnet` (omniprésents dans
+    /// les configurations réelles : `lan address`…) sont modélisés :
+    /// sous-réseau exporté explicitement, ou déduit des adresses de
+    /// l'interface — jamais deviné.
+    #[test]
+    fn objet_interface_subnet_modelise() {
+        let out = import(
+            "config system interface\n    edit \"lan\"\n        \
+             set ip 10.10.1.1 255.255.248.0\n    next\nend\n\
+             config firewall address\n    edit \"lan address\"\n        \
+             set type interface-subnet\n        \
+             set subnet 10.10.1.1 255.255.248.0\n        \
+             set interface \"lan\"\n    next\n    edit \"lan implicite\"\n        \
+             set type interface-subnet\n        \
+             set interface \"lan\"\n    next\n    edit \"orphelin\"\n        \
+             set type interface-subnet\n        \
+             set interface \"absente\"\n    next\nend\n",
+        );
+        let attendu = AddrObject::Nets(vec!["10.10.0.0/21".parse().expect("net")]);
+        assert_eq!(
+            out.device
+                .objects
+                .addresses
+                .get(&ObjectId::new("lan address")),
+            Some(&attendu),
+            "sous-réseau exporté explicitement"
+        );
+        assert_eq!(
+            out.device
+                .objects
+                .addresses
+                .get(&ObjectId::new("lan implicite")),
+            Some(&attendu),
+            "sous-réseau déduit des adresses de l'interface"
+        );
+        // Interface introuvable : diagnostic, jamais une supposition.
+        assert!(!out
+            .device
+            .objects
+            .addresses
+            .contains_key(&ObjectId::new("orphelin")));
+        let Fidelity::Partial { unsupported } = &out.fidelity else {
+            panic!("l'objet irrésoluble doit dégrader la fidélité");
+        };
+        assert!(unsupported
+            .iter()
+            .any(|d| d.message.contains("orphelin") && d.message.contains("interface-subnet")));
     }
 }

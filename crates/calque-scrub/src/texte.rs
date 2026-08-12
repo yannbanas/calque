@@ -98,10 +98,11 @@ pub(crate) fn decouper_lexemes(ligne: &str) -> Vec<String> {
     lexemes
 }
 
-/// `s` est-il un remplacement déjà produit par le scrub (`anon-<type>-<n>`
-/// ou `SUPPRIME`) ? Sert à l'idempotence : on ne ré-anonymise jamais.
+/// `s` est-il un remplacement déjà produit par le scrub (`anon-<type>-<n>`,
+/// `SUPPRIME` ou `SUPPRIME-CERT`) ? Sert à l'idempotence : on ne
+/// ré-anonymise jamais.
 pub(crate) fn est_anonyme(s: &str) -> bool {
-    if s == "SUPPRIME" {
+    if s == "SUPPRIME" || s == "SUPPRIME-CERT" {
         return true;
     }
     let Some(reste) = s.strip_prefix("anon-") else {
@@ -203,6 +204,7 @@ mod tests {
         assert!(est_anonyme("anon-host-1"));
         assert!(est_anonyme("anon-intf-42"));
         assert!(est_anonyme("SUPPRIME"));
+        assert!(est_anonyme("SUPPRIME-CERT"));
         assert!(!est_anonyme("anon-host-"));
         assert!(!est_anonyme("anon--1"));
         assert!(!est_anonyme("anonyme-1"));

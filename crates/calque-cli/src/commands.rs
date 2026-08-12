@@ -54,6 +54,10 @@ pub fn run(cli: Cli) -> miette::Result<ExitCode> {
         // `scrub` est indépendant du projet `.calque/` : il ne lit et
         // n'écrit que les fichiers désignés par l'utilisateur.
         Command::Scrub(args) => scrub(args).map(|()| ExitCode::SUCCESS),
+        #[cfg(feature = "collect")]
+        Command::Collect(args) => crate::collect_cmd::collect(&root, args),
+        #[cfg(feature = "collect")]
+        Command::Verify(args) => crate::collect_cmd::verify(&root, args),
     }
 }
 
@@ -98,7 +102,15 @@ fn import(root: &Path, args: ImportArgs) -> miette::Result<()> {
     Ok(())
 }
 
-fn add_import(project: &mut Project, file: &Path, name: Option<&str>) -> miette::Result<()> {
+/// Importe un fichier dans le projet et rend l'identifiant de
+/// l'équipement créé ou remplacé. `pub(crate)` : la collecte en ligne
+/// (`collect_cmd`, feature `collect`) importe la configuration récupérée
+/// par SSH EXACTEMENT comme un import de fichier.
+pub(crate) fn add_import(
+    project: &mut Project,
+    file: &Path,
+    name: Option<&str>,
+) -> miette::Result<DeviceId> {
     let outcome = backend::import_config(file, name)?;
     println!(
         "{} : {} → équipement « {} » ({} interface(s), {} politique(s))",
@@ -120,13 +132,13 @@ fn add_import(project: &mut Project, file: &Path, name: Option<&str>) -> miette:
     project
         .device_files
         .insert(id.clone(), file.display().to_string());
-    project.device_fidelity.insert(id, outcome.fidelity);
+    project.device_fidelity.insert(id.clone(), outcome.fidelity);
     project.recompute_fidelity();
     let label = file.display().to_string();
     if !project.imported_files.contains(&label) {
         project.imported_files.push(label);
     }
-    Ok(())
+    Ok(id)
 }
 
 // ---------------------------------------------------------------------------
@@ -227,7 +239,7 @@ fn line_byte_range(src: &str, line: u32) -> Option<std::ops::Range<usize>> {
 
 /// Les équipements traversés par la trace dont l'import est partiel :
 /// un verdict qui les traverse n'est pas ferme (§6.3).
-fn partial_devices_on_path(project: &Project, trace: &Trace) -> Vec<(DeviceId, usize)> {
+pub(crate) fn partial_devices_on_path(project: &Project, trace: &Trace) -> Vec<(DeviceId, usize)> {
     let mut seen = BTreeSet::new();
     let mut out = Vec::new();
     for hop in &trace.hops {
@@ -580,7 +592,7 @@ fn test(root: &Path, args: TestArgs) -> miette::Result<ExitCode> {
     })
 }
 
-fn load_flows(path: &Path) -> miette::Result<FlowsFile> {
+pub(crate) fn load_flows(path: &Path) -> miette::Result<FlowsFile> {
     // Borne de taille AVANT la désérialisation YAML (audit R1 — bombes
     // YAML) : la justification est documentée sur `MAX_YAML_BYTES`.
     let raw = backend::read_bounded(path, backend::MAX_YAML_BYTES, "un fichier de flux")?;
@@ -659,7 +671,7 @@ fn resolve_zone_sample(network: &Network, name: &str) -> Result<IpAddr, String> 
 /// extrémités sont résolues (voir [`resolve_endpoint`]) et `port: any`
 /// devient un paquet représentatif 80/tcp (avec une note ; la couverture
 /// complète de l'intervalle arrive avec le mode symbolique, S6).
-fn flow_packet(
+pub(crate) fn flow_packet(
     network: &Network,
     flow: &FlowSpec,
 ) -> Result<(ConcretePacket, Option<String>), String> {
@@ -1046,7 +1058,18 @@ fn scrub(args: ScrubArgs) -> miette::Result<()> {
     let mut sorties: Vec<String> = Vec::with_capacity(args.files.len());
     for file in &args.files {
         let brut = backend::read_bounded(file, backend::MAX_CONFIG_BYTES, "une configuration")?;
-        sorties.push(scrubber.scrub(&brut));
+        let (texte, rapport) = scrubber.scrub_avec_rapport(&brut);
+        if !rapport.format_reconnu {
+            // En gras, sur stderr : la passe de collecte des noms n'a pas
+            // reconnu le format — seuls secrets et adresses sont couverts.
+            eprintln!(
+                "\x1b[1mATTENTION : format non reconnu ({}) — anonymisation probablement \
+                 incomplète (noms et identifiants non détectés). Ne diffusez pas ce résultat \
+                 sans relecture approfondie.\x1b[0m",
+                file.display()
+            );
+        }
+        sorties.push(texte);
     }
 
     // 3. Écriture.
@@ -1126,7 +1149,7 @@ struct TopoEnd {
 
 /// Deux liens relient-ils la même paire d'extrémités (peu importe l'ordre
 /// et l'origine) ?
-fn same_pair(x: &Link, y: &Link) -> bool {
+pub(crate) fn same_pair(x: &Link, y: &Link) -> bool {
     (x.a == y.a && x.b == y.b) || (x.a == y.b && x.b == y.a)
 }
 

@@ -1,0 +1,48 @@
+------------------------------------------------
+Local Intf: Gi0/1
+Chassis id: 0026.9915.c3a0
+Port id: Gi0/24
+Port Description: uplink vers fw-01
+System Name: sw-acces-01
+
+System Description:
+Cisco IOS Software, C2960 Software (C2960-LANBASEK9-M), Version 15.0(2)SE11
+Copyright (c) 1986-2017 by Cisco Systems, Inc.
+
+Time remaining: 96 seconds
+System Capabilities: B
+Enabled Capabilities: B
+Management Addresses:
+    IP: 10.0.99.11
+Auto Negotiation - supported, enabled
+Physical media capabilities:
+    100base-TX(FD)
+    100base-TX(HD)
+    10base-T(FD)
+    10base-T(HD)
+Media Attachment Unit type: 16
+Vlan ID: 1
+
+------------------------------------------------
+Local Intf: Te1/0/48
+Chassis id: 7c95.f3aa.1240
+Port id: TenGigabitEthernet1/1/1
+Port Description: agregation coeur
+System Name: sw-coeur-01.exemple.local
+
+System Description:
+Cisco IOS Software, IOS-XE Software, Catalyst L3 Switch Software (CAT3K_CAA-UNIVERSALK9-M), Version 16.12.10
+Copyright (c) 1986-2023 by Cisco Systems, Inc.
+
+Time remaining: 104 seconds
+System Capabilities: B,R
+Enabled Capabilities: B,R
+Management Addresses:
+    IP: 10.0.99.10
+Auto Negotiation - not supported
+Physical media capabilities - not advertised
+Media Attachment Unit type - not advertised
+Vlan ID: 1
+
+
+Total entries displayed: 2

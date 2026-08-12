@@ -1,0 +1,252 @@
+---
+source: crates/calque-parse/src/xml.rs
+expression: tree
+---
+ConfigTree {
+    roots: [
+        ConfigNode {
+            keyword: "opnsense",
+            args: [],
+            children: [
+                ConfigNode {
+                    keyword: "version",
+                    args: [
+                        "23.7",
+                    ],
+                    children: [],
+                    span: SourceSpan {
+                        file: "config.xml",
+                        line: 3,
+                        end_line: None,
+                    },
+                },
+                ConfigNode {
+                    keyword: "interfaces",
+                    args: [],
+                    children: [
+                        ConfigNode {
+                            keyword: "lan",
+                            args: [],
+                            children: [
+                                ConfigNode {
+                                    keyword: "if",
+                                    args: [
+                                        "vtnet1",
+                                    ],
+                                    children: [],
+                                    span: SourceSpan {
+                                        file: "config.xml",
+                                        line: 6,
+                                        end_line: None,
+                                    },
+                                },
+                                ConfigNode {
+                                    keyword: "descr",
+                                    args: [
+                                        "R&D",
+                                        "étage",
+                                        "2",
+                                    ],
+                                    children: [],
+                                    span: SourceSpan {
+                                        file: "config.xml",
+                                        line: 7,
+                                        end_line: None,
+                                    },
+                                },
+                                ConfigNode {
+                                    keyword: "enable",
+                                    args: [
+                                        "1",
+                                    ],
+                                    children: [],
+                                    span: SourceSpan {
+                                        file: "config.xml",
+                                        line: 8,
+                                        end_line: None,
+                                    },
+                                },
+                                ConfigNode {
+                                    keyword: "ipaddr",
+                                    args: [
+                                        "10.10.1.1",
+                                    ],
+                                    children: [],
+                                    span: SourceSpan {
+                                        file: "config.xml",
+                                        line: 9,
+                                        end_line: None,
+                                    },
+                                },
+                                ConfigNode {
+                                    keyword: "subnet",
+                                    args: [
+                                        "24",
+                                    ],
+                                    children: [],
+                                    span: SourceSpan {
+                                        file: "config.xml",
+                                        line: 10,
+                                        end_line: None,
+                                    },
+                                },
+                            ],
+                            span: SourceSpan {
+                                file: "config.xml",
+                                line: 5,
+                                end_line: Some(
+                                    11,
+                                ),
+                            },
+                        },
+                    ],
+                    span: SourceSpan {
+                        file: "config.xml",
+                        line: 4,
+                        end_line: Some(
+                            12,
+                        ),
+                    },
+                },
+                ConfigNode {
+                    keyword: "filter",
+                    args: [],
+                    children: [
+                        ConfigNode {
+                            keyword: "rule",
+                            args: [
+                                "@uuid=9b2f1c04-5d1e-4d8e-9f3a-000000000001",
+                            ],
+                            children: [
+                                ConfigNode {
+                                    keyword: "type",
+                                    args: [
+                                        "pass",
+                                    ],
+                                    children: [],
+                                    span: SourceSpan {
+                                        file: "config.xml",
+                                        line: 15,
+                                        end_line: None,
+                                    },
+                                },
+                                ConfigNode {
+                                    keyword: "descr",
+                                    args: [
+                                        "règle",
+                                        "<historique>",
+                                        "&",
+                                        "sans",
+                                        "filet",
+                                    ],
+                                    children: [],
+                                    span: SourceSpan {
+                                        file: "config.xml",
+                                        line: 16,
+                                        end_line: None,
+                                    },
+                                },
+                                ConfigNode {
+                                    keyword: "source",
+                                    args: [],
+                                    children: [
+                                        ConfigNode {
+                                            keyword: "any",
+                                            args: [],
+                                            children: [],
+                                            span: SourceSpan {
+                                                file: "config.xml",
+                                                line: 17,
+                                                end_line: None,
+                                            },
+                                        },
+                                    ],
+                                    span: SourceSpan {
+                                        file: "config.xml",
+                                        line: 17,
+                                        end_line: None,
+                                    },
+                                },
+                            ],
+                            span: SourceSpan {
+                                file: "config.xml",
+                                line: 14,
+                                end_line: Some(
+                                    18,
+                                ),
+                            },
+                        },
+                    ],
+                    span: SourceSpan {
+                        file: "config.xml",
+                        line: 13,
+                        end_line: Some(
+                            19,
+                        ),
+                    },
+                },
+                ConfigNode {
+                    keyword: "aliases",
+                    args: [],
+                    children: [
+                        ConfigNode {
+                            keyword: "alias",
+                            args: [],
+                            children: [
+                                ConfigNode {
+                                    keyword: "name",
+                                    args: [
+                                        "n_postes",
+                                    ],
+                                    children: [],
+                                    span: SourceSpan {
+                                        file: "config.xml",
+                                        line: 22,
+                                        end_line: None,
+                                    },
+                                },
+                                ConfigNode {
+                                    keyword: "content",
+                                    args: [
+                                        "10.10.1.0/24",
+                                        "10.10.3.0/24",
+                                    ],
+                                    children: [],
+                                    span: SourceSpan {
+                                        file: "config.xml",
+                                        line: 23,
+                                        end_line: Some(
+                                            24,
+                                        ),
+                                    },
+                                },
+                            ],
+                            span: SourceSpan {
+                                file: "config.xml",
+                                line: 21,
+                                end_line: Some(
+                                    25,
+                                ),
+                            },
+                        },
+                    ],
+                    span: SourceSpan {
+                        file: "config.xml",
+                        line: 20,
+                        end_line: Some(
+                            26,
+                        ),
+                    },
+                },
+            ],
+            span: SourceSpan {
+                file: "config.xml",
+                line: 2,
+                end_line: Some(
+                    27,
+                ),
+            },
+        },
+    ],
+    file: "config.xml",
+}

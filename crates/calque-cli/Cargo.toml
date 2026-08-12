@@ -9,8 +9,19 @@ publish = false
 name = "calque"
 path = "src/main.rs"
 
+# La collecte en ligne (S7) est OPTIONNELLE (§8) : sans `--features
+# collect`, la pile SSH n'est même pas compilée — l'analyse hors ligne
+# reste un binaire sans réseau.
+[features]
+collect = ["dep:calque-collect", "dep:rpassword"]
+
 [dependencies]
 calque-model = { workspace = true }
+calque-collect = { workspace = true, optional = true }
+# Saisie du mot de passe SANS écho (jamais d'argument --password en
+# clair : la ligne de commande est visible de tous les processus et des
+# historiques de shell).
+rpassword = { version = "7", optional = true }
 calque-space = { workspace = true }
 calque-policy = { workspace = true }
 calque-report = { workspace = true }

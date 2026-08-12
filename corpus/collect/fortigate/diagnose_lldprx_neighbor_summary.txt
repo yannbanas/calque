@@ -1,0 +1,9 @@
+lldprx: show neighbor summary
+
+Portname             Chassis              System-Name        Port-ID                   TTL
+____________         _________________    _____________      ____________________      ____
+
+port1                00:26:99:15:c3:a0    sw-acces-01        Gi0/23                    117
+wan1                 7c:95:f3:aa:12:40    rt-operateur-01    GigabitEthernet0/0/0      98
+
+fw-agence-01 #

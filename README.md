@@ -234,12 +234,15 @@ terrain sont bienvenus.
 | — | Topologie v1 : inférence par sous-réseau, `topology.yaml`, `topology check` | ✅ |
 | S5 | Deuxième constructeur : Cisco IOS (interfaces, routes, ACL, object-groups) | ✅ |
 | S6 | Mode symbolique : `calque reach --to/--from`, `calque model dead-rules` | ✅ |
-| — | `calque scrub` — anonymisation cohérente (relations de sous-réseau préservées, secrets caviardés) | ✅ |
-| S7 | Collecte SSH, voisinage LLDP, découverte de topologie | ⏳ |
+| — | `calque scrub` — anonymisation cohérente (relations de sous-réseau préservées, secrets caviardés, avertissement si format non reconnu) | ✅ |
+| — | Constructeurs 3 et 4 : OPNsense/pfSense (XML) et nftables | ✅ |
+| — | Formats d'export : FortiOS CLI **et** export YAML, détection automatique | ✅ |
+| S7 | Collecte SSH (`calque collect`, lecture seule stricte, LLDP/CDP) et confrontation au réel (`calque verify --against-reality`) — feature Cargo `collect`, désactivée par défaut | ✅ |
 
-Constructeurs visés, dans l'ordre : **FortiGate**, Cisco IOS/IOS-XE,
-pfSense/OPNsense, nftables, puis HPE/Aruba et UniFi. Un constructeur
-parfaitement traité vaut mieux que six approximatifs.
+Constructeurs gérés : **FortiGate** (CLI et export YAML), **Cisco
+IOS/IOS-XE**, **OPNsense/pfSense** (config.xml), **nftables**. À venir :
+HPE/Aruba, UniFi. Un constructeur parfaitement traité vaut mieux que six
+approximatifs.
 
 ## Contribuer
 

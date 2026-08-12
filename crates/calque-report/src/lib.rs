@@ -758,6 +758,11 @@ pub struct DeadRulesView {
     /// Nombre d'équipements analysés.
     pub devices: usize,
     pub rules: Vec<DeadRuleView>,
+    /// Règles exclues de l'analyse (objet irrésoluble hors ligne — fqdn,
+    /// geography… — ou cycle), jamais déclarées mortes ni comptées comme
+    /// masques (§6.3). Messages prêts à afficher.
+    #[serde(default)]
+    pub excluded: Vec<String>,
 }
 
 /// Rendu texte du rapport des règles mortes.
@@ -808,11 +813,24 @@ pub fn render_dead_rules_text(view: &DeadRulesView) -> String {
              un paquet."
         );
     }
+    if !view.excluded.is_empty() {
+        let _ = writeln!(
+            out,
+            "\n{} règle(s) EXCLUE(S) de l'analyse (objets irrésolubles hors \
+             ligne — jamais déclarées mortes, jamais comptées comme masques, \
+             §6.3) :",
+            view.excluded.len()
+        );
+        for e in &view.excluded {
+            let _ = writeln!(out, "  - {e}");
+        }
+    }
     let _ = writeln!(
         out,
-        "{} équipement(s) analysé(s), {} règle(s) morte(s).",
+        "{} équipement(s) analysé(s), {} règle(s) morte(s), {} exclue(s).",
         view.devices,
-        view.rules.len()
+        view.rules.len(),
+        view.excluded.len()
     );
     out
 }
@@ -1123,6 +1141,7 @@ mod tests {
 
     fn dead_exemple() -> DeadRulesView {
         DeadRulesView {
+            excluded: Vec::new(),
             devices: 1,
             rules: vec![
                 DeadRuleView {
@@ -1177,7 +1196,7 @@ mod tests {
         assert!(txt.contains("ENSEMBLE VIDE"), "{txt}");
         assert!(txt.contains("ne peut correspondre à aucun paquet"), "{txt}");
         assert!(
-            txt.contains("1 équipement(s) analysé(s), 2 règle(s) morte(s)."),
+            txt.contains("1 équipement(s) analysé(s), 2 règle(s) morte(s), 0 exclue(s)."),
             "{txt}"
         );
     }
@@ -1187,11 +1206,14 @@ mod tests {
         let view = DeadRulesView {
             devices: 2,
             rules: vec![],
+            excluded: vec!["équipement « fw-01 » : règle « 9 » exclue".into()],
         };
         let txt = render_dead_rules_text(&view);
         assert!(txt.contains("Aucune règle morte"), "{txt}");
+        assert!(txt.contains("EXCLUE"), "{txt}");
+        assert!(txt.contains("règle « 9 » exclue"), "{txt}");
         assert!(
-            txt.contains("2 équipement(s) analysé(s), 0 règle(s) morte(s)."),
+            txt.contains("2 équipement(s) analysé(s), 0 règle(s) morte(s), 1 exclue(s)."),
             "{txt}"
         );
     }

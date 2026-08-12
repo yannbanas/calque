@@ -1,0 +1,22 @@
+C
+=================================================================
+=  ACCES RESERVE - Reseau agence - toute connexion est journalisee  =
+=  --More-- n est pas une invite ici : piege de bannieres         =
+=================================================================
+
+sw-agence-01#show lldp neighbors detail
+------------------------------------------------
+Local Intf: Gi0/1
+Chassis id: 0026.9915.c3a0
+Port id: Gi0/24
+System Name: sw-acces-01
+Time remaining: 96 seconds
+ [7m--More--[m          ------------------------------------------------
+Local Intf: Gi0/2
+Chassis id: 0011.bbcc.dd01
+Port id: Gi0/0/1
+System Name: rt-agence-02
+Time remaining: 120 seconds
+
+Total entries displayed: 2
+sw-agence-01#

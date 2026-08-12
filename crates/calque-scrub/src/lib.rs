@@ -35,6 +35,41 @@ use std::net::{Ipv4Addr, Ipv6Addr};
 
 use texte::{segmenter, Seg};
 
+/// Ce que la passe 1 a reconnu de l'entrée d'un appel à
+/// [`Scrubber::scrub_avec_rapport`].
+///
+/// Quand `format_reconnu` est FAUX, la collecte structurelle des noms n'a
+/// pas eu lieu : hostname, noms d'objets, identifiants et domaines sont
+/// probablement restés en clair (seuls secrets et adresses IP, traités
+/// lexicalement, sont couverts). L'appelant DOIT alors avertir avant
+/// toute diffusion du résultat.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RapportScrub {
+    /// `true` si la passe 1 a reconnu le format de l'entrée (FortiGate
+    /// CLI, export YAML FortiOS, ou Cisco IOS) et a donc pu collecter
+    /// les noms par la structure.
+    pub format_reconnu: bool,
+    /// Étiquette du format reconnu : `"fortigate"`, `"fortigate-yaml"`,
+    /// `"fortigate-degrade"` (repli ligne à ligne) ou `"cisco-ios"`.
+    pub format: Option<&'static str>,
+}
+
+impl RapportScrub {
+    pub(crate) fn reconnu(format: &'static str) -> Self {
+        Self {
+            format_reconnu: true,
+            format: Some(format),
+        }
+    }
+
+    pub(crate) fn inconnu() -> Self {
+        Self {
+            format_reconnu: false,
+            format: None,
+        }
+    }
+}
+
 /// L'anonymiseur. Réutilisable sur plusieurs fichiers : le mapping —
 /// noms comme adresses — est conservé d'un appel à l'autre.
 #[derive(Debug, Default)]
@@ -65,12 +100,23 @@ impl Scrubber {
     /// Anonymise `entree` et renvoie le texte transformé. Chaque appel
     /// enrichit le mapping commun : passer plusieurs fichiers au même
     /// `Scrubber` garantit des remplacements identiques partout.
+    ///
+    /// Préférer [`Self::scrub_avec_rapport`] : elle dit EN PLUS si le
+    /// format a été reconnu — sans quoi l'anonymisation des noms est
+    /// probablement incomplète.
     pub fn scrub(&mut self, entree: &str) -> String {
+        self.scrub_avec_rapport(entree).0
+    }
+
+    /// Comme [`Self::scrub`], et renvoie en plus le [`RapportScrub`] de
+    /// la passe 1 : si `format_reconnu` est faux, prévenir l'utilisateur
+    /// avant toute diffusion du résultat.
+    pub fn scrub_avec_rapport(&mut self, entree: &str) -> (String, RapportScrub) {
         // Passe 0 : les secrets disparaissent avant toute analyse — une
         // clé privée multi-lignes ne doit même pas atteindre l'analyseur.
         let expurge = secrets::rediger(entree);
         // Passe 1 : collecte des noms déclarés, par la structure.
-        self.collecter(&expurge);
+        let rapport = self.collecter(&expurge);
         // Passe 2 : réécriture ligne à ligne, au caractère près.
         let mut lignes: Vec<String> = Vec::new();
         for brute in expurge.split('\n') {
@@ -82,7 +128,7 @@ impl Scrubber {
             faite.push_str(cr);
             lignes.push(faite);
         }
-        lignes.join("\n")
+        (lignes.join("\n"), rapport)
     }
 
     /// La table de correspondance original → remplacement, triée par
@@ -105,6 +151,23 @@ impl Scrubber {
                 if let Some(r) = self.descriptions.get(&cle) {
                     let retrait = &ligne[..ligne.len() - coupe.len()];
                     return format!("{retrait}description {r}");
+                }
+            }
+        }
+
+        // Entrée d'export YAML FortiOS `- nom:` : le nom est DÉCLARÉ ici
+        // sans guillemets — la portée « citée » ne le couvrirait pas. Le
+        // nom exact (cité ou non) est remplacé d'un bloc.
+        if let Some(reste) = coupe.strip_prefix("- ") {
+            if let Some(brut) = reste.trim_end().strip_suffix(':') {
+                let brut = brut.trim();
+                let interieur = brut
+                    .strip_prefix('"')
+                    .and_then(|s| s.strip_suffix('"'))
+                    .unwrap_or(brut);
+                if let Some(r) = self.remplacement_exact(interieur) {
+                    let retrait = &ligne[..ligne.len() - coupe.len()];
+                    return format!("{retrait}- {r}:");
                 }
             }
         }

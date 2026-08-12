@@ -7,7 +7,36 @@ majeur.
 
 ## [Unreleased]
 
-Rien pour l'instant.
+### Ajouté
+
+- **Deux nouveaux constructeurs** : OPNsense/pfSense (config.xml, couche 1
+  XML sécurisée sans résolution d'entités) et nftables (fichiers de règles
+  et sortie `nft list ruleset`, chaînes de base et régulières via `Jump`,
+  sets/defines résolus tard, `ct state` traité sans dégrader la fidélité).
+- **Format export YAML FortiOS** : détection automatique et conversion
+  vers le même arbre que le CLI (testé par égalité stricte des deux
+  imports) — les exports d'outils de sauvegarde s'importent directement.
+- **S7 — collecte et confrontation au réel** (feature Cargo `collect`,
+  désactivée par défaut : l'analyse hors ligne ne compile pas la pile
+  SSH) : `calque collect` (SSH lecture seule stricte avec liste blanche,
+  voisins LLDP/CDP fusionnés dans la topologie) et
+  `calque verify --against-reality` (§11.2).
+- Objets adresse FortiGate `interface-subnet` modélisés (sous-réseau
+  exporté ou déduit des adresses de l'interface).
+
+### Corrigé
+
+- **Import : sélection par adaptateur, plus jamais par constructeur** —
+  deux adaptateurs peuvent servir le même constructeur (FortiGate CLI et
+  export YAML) ; l'ancien dispatch envoyait le YAML vers l'adaptateur CLI
+  et cassait aussi l'import Cisco/OPNsense/nftables via le binaire.
+- **`calque scrub` : plus jamais d'anonymisation incomplète silencieuse**
+  — avertissement explicite quand le format n'est pas reconnu ; secrets au
+  format YAML (`password: [ENC, …]`, clés privées, certificats) caviardés ;
+  collecte des noms sur l'export YAML.
+- `calque model dead-rules` : une règle irrésoluble hors ligne (objet
+  fqdn/geography, VIP…) est exclue avec diagnostic au lieu d'interrompre
+  toute l'analyse (abstention sûre, jamais un faux positif).
 
 ## [0.1.0] — 2026-08-12
 

@@ -39,7 +39,9 @@ pub mod trace;
 #[cfg(test)]
 mod testutil;
 
-pub use dead::{dead_rules, DeadRule, DeadRuleKind, Masker, MAX_UNION_CUBES};
+pub use dead::{
+    dead_rules, dead_rules_report, DeadRule, DeadRuleKind, DeadRulesReport, Masker, MAX_UNION_CUBES,
+};
 pub use engine::{trace_packet, trace_packet_from};
 pub use error::EvalError;
 pub use policy::{evaluate_policy, FilterPoint, FilterResult, NatGrant, PolicyEvaluation};

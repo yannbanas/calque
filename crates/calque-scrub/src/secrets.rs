@@ -14,6 +14,18 @@
 //!   devient `set <clé> SUPPRIME`, les lignes de continuation sont
 //!   supprimées jusqu'au guillemet fermant.
 //!
+//! Côté export YAML FortiOS (`clé: valeur`), mêmes règles de clé :
+//! - `password: [ENC, <blob>]`, `passwd:`, `old-password:`,
+//!   `psksecret: [ENC, <blob>]`, `private-key: "<PEM sur une ligne>"`,
+//!   toute clé finissant par `-key` ou contenant passw/pwd/secret/psk/
+//!   passphrase → `clé: SUPPRIME`, le blob `ENC` entier disparaît
+//!   (jamais dans la table de correspondance) ;
+//! - `<clé>: ENC …` ou `<clé>: [ENC, …]` quel que soit le nom de la clé ;
+//! - `certificate:` / `public-key:` (et `…-certificate:`) : la valeur est
+//!   caviardée avec le motif distinct `SUPPRIME-CERT` — un certificat
+//!   n'est pas un secret au sens strict, mais son sujet/CN embarque le
+//!   numéro de série de l'équipement, un identifiant.
+//!
 //! Côté Cisco IOS : `enable secret|password`, `username ... password|secret`,
 //! `snmp-server community` (et `location`/`contact`, identifiants de site),
 //! `crypto isakmp key` (l'adresse du pair est conservée), `tacacs-server` /
@@ -60,6 +72,33 @@ fn cle_secrete_fortios(cle: &str) -> bool {
         || cle.ends_with("key")
 }
 
+/// La clé désigne-t-elle un certificat ou une clé publique ? Caviardés
+/// avec le motif distinct `SUPPRIME-CERT` (identifiant, pas secret).
+fn cle_certificat(cle: &str) -> bool {
+    cle == "certificate" || cle == "public-key" || cle.ends_with("-certificate")
+}
+
+/// `clé: valeur` d'un export YAML FortiOS : la clé brute (telle qu'écrite)
+/// et la valeur, si la ligne a cette forme. Le `:` séparateur doit être
+/// collé à la clé et suivi d'un blanc — les lignes Cisco (`enable secret
+/// x`, blanc avant tout `:`) et les scalaires (`10.0.0.1:443`) ne
+/// matchent pas.
+fn couper_cle_yaml(coupe: &str) -> Option<(&str, &str)> {
+    let b = coupe.as_bytes();
+    for (i, &octet) in b.iter().enumerate() {
+        if octet == b':' {
+            if i == 0 || (i + 1 < b.len() && !b[i + 1].is_ascii_whitespace()) {
+                return None;
+            }
+            return Some((&coupe[..i], &coupe[i + 1..]));
+        }
+        if octet.is_ascii_whitespace() {
+            return None;
+        }
+    }
+    None
+}
+
 /// Redige une ligne si elle porte un secret. Renvoie la ligne réécrite et
 /// `true` si une valeur citée reste ouverte (continuation à supprimer).
 fn rediger_ligne(contenu: &str) -> Option<(String, bool)> {
@@ -77,6 +116,29 @@ fn rediger_ligne(contenu: &str) -> Option<(String, bool)> {
             return Some((format!("{retrait}set {} SUPPRIME", lex[1]), saut));
         }
         return None;
+    }
+
+    // --- Export YAML FortiOS : `clé: valeur` ---
+    if !coupe.starts_with("- ") {
+        if let Some((cle_brute, valeur)) = couper_cle_yaml(coupe) {
+            let cle = cle_brute.trim_matches('"').to_ascii_lowercase();
+            let v = valeur.trim();
+            if !v.is_empty() {
+                if cle_certificat(&cle) {
+                    let saut = nb_guillemets(contenu) % 2 == 1;
+                    return Some((format!("{retrait}{cle_brute}: SUPPRIME-CERT"), saut));
+                }
+                let enc = v == "ENC"
+                    || v.starts_with("ENC ")
+                    || v.strip_prefix('[')
+                        .is_some_and(|r| r.trim_start().starts_with("ENC"));
+                if cle_secrete_fortios(&cle) || enc {
+                    let saut = nb_guillemets(contenu) % 2 == 1;
+                    return Some((format!("{retrait}{cle_brute}: SUPPRIME"), saut));
+                }
+            }
+            return None;
+        }
     }
 
     // --- Cisco IOS ---
@@ -209,6 +271,78 @@ mod tests {
         ] {
             assert_eq!(rediger(avant), attendu, "{avant}");
         }
+    }
+
+    #[test]
+    fn secrets_yaml_caviardes() {
+        for (avant, apres) in [
+            (
+                "        password: [ENC, U0VDUkVUMTIz]",
+                "        password: SUPPRIME",
+            ),
+            ("        passwd: motdepasse", "        passwd: SUPPRIME"),
+            (
+                "        old-password: [ENC, QU5DSUVO]",
+                "        old-password: SUPPRIME",
+            ),
+            (
+                "        psksecret: [ENC, Q0xFRg==]",
+                "        psksecret: SUPPRIME",
+            ),
+            (
+                "        private-key: \"-----BEGIN RSA PRIVATE KEY-----AAAA-----END RSA PRIVATE KEY-----\"",
+                "        private-key: SUPPRIME",
+            ),
+            ("        auth-pwd: \"abc\"", "        auth-pwd: SUPPRIME"),
+            ("        ppk-secret: xyz", "        ppk-secret: SUPPRIME"),
+            ("        passphrase: \"a b\"", "        passphrase: SUPPRIME"),
+            // Valeur `ENC` (nue ou en liste) : clé quelconque, caviardée.
+            (
+                "        inconnu: [ENC, ZmF1eA==]",
+                "        inconnu: SUPPRIME",
+            ),
+            ("        inconnu: ENC ZmF1eA==", "        inconnu: SUPPRIME"),
+        ] {
+            assert_eq!(rediger(avant), apres, "{avant}");
+        }
+    }
+
+    /// Un certificat n'est pas un secret au sens strict mais son CN porte
+    /// le numéro de série de l'équipement : motif distinct SUPPRIME-CERT.
+    #[test]
+    fn certificats_yaml_caviardes_avec_motif_distinct() {
+        for (avant, apres) in [
+            (
+                "        certificate: \"-----BEGIN CERTIFICATE-----FGT60F0000000001-----END CERTIFICATE-----\"",
+                "        certificate: SUPPRIME-CERT",
+            ),
+            (
+                "        public-key: \"ssh-rsa AAAAB3Nza fw-serie\"",
+                "        public-key: SUPPRIME-CERT",
+            ),
+            (
+                "        ca-certificate: \"blob\"",
+                "        ca-certificate: SUPPRIME-CERT",
+            ),
+        ] {
+            assert_eq!(rediger(avant), apres, "{avant}");
+        }
+    }
+
+    #[test]
+    fn lignes_yaml_ordinaires_intactes() {
+        let texte = concat!(
+            "system_global:\n",
+            "    hostname: \"fw\"\n",
+            "    admin-sport: 44301\n",
+            "system_interface:\n",
+            "    - wan1:\n",
+            "        ip: [192.0.2.1, 255.255.255.248]\n",
+            "        allowaccess: [ping, https]\n"
+        );
+        assert_eq!(rediger(texte), texte);
+        // Une clé sans valeur (ouverture de bloc) n'est jamais touchée.
+        assert_eq!(rediger("    gui-dashboard:"), "    gui-dashboard:");
     }
 
     #[test]

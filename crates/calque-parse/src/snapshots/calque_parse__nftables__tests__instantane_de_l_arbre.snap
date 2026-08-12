@@ -1,0 +1,261 @@
+---
+source: crates/calque-parse/src/nftables.rs
+expression: tree
+---
+ConfigTree {
+    roots: [
+        ConfigNode {
+            keyword: "flush",
+            args: [
+                "ruleset",
+            ],
+            children: [],
+            span: SourceSpan {
+                file: "regles.nft",
+                line: 4,
+                end_line: None,
+            },
+        },
+        ConfigNode {
+            keyword: "define",
+            args: [
+                "net_admin",
+                "=",
+                "10.20.30.0/24",
+            ],
+            children: [],
+            span: SourceSpan {
+                file: "regles.nft",
+                line: 6,
+                end_line: None,
+            },
+        },
+        ConfigNode {
+            keyword: "table",
+            args: [
+                "inet",
+                "filtre",
+            ],
+            children: [
+                ConfigNode {
+                    keyword: "set",
+                    args: [
+                        "postes",
+                    ],
+                    children: [
+                        ConfigNode {
+                            keyword: "type",
+                            args: [
+                                "ipv4_addr",
+                            ],
+                            children: [],
+                            span: SourceSpan {
+                                file: "regles.nft",
+                                line: 10,
+                                end_line: None,
+                            },
+                        },
+                        ConfigNode {
+                            keyword: "elements",
+                            args: [
+                                "=",
+                                "{",
+                                "10.20.40.0/26",
+                                ",",
+                                "10.20.42.7",
+                                "}",
+                            ],
+                            children: [],
+                            span: SourceSpan {
+                                file: "regles.nft",
+                                line: 11,
+                                end_line: Some(
+                                    12,
+                                ),
+                            },
+                        },
+                    ],
+                    span: SourceSpan {
+                        file: "regles.nft",
+                        line: 9,
+                        end_line: Some(
+                            13,
+                        ),
+                    },
+                },
+                ConfigNode {
+                    keyword: "chain",
+                    args: [
+                        "entree",
+                    ],
+                    children: [
+                        ConfigNode {
+                            keyword: "type",
+                            args: [
+                                "filter",
+                                "hook",
+                                "input",
+                                "priority",
+                                "0",
+                            ],
+                            children: [],
+                            span: SourceSpan {
+                                file: "regles.nft",
+                                line: 16,
+                                end_line: None,
+                            },
+                        },
+                        ConfigNode {
+                            keyword: "policy",
+                            args: [
+                                "drop",
+                            ],
+                            children: [],
+                            span: SourceSpan {
+                                file: "regles.nft",
+                                line: 16,
+                                end_line: None,
+                            },
+                        },
+                        ConfigNode {
+                            keyword: "ct",
+                            args: [
+                                "state",
+                                "established",
+                                ",",
+                                "related",
+                                "accept",
+                            ],
+                            children: [],
+                            span: SourceSpan {
+                                file: "regles.nft",
+                                line: 17,
+                                end_line: None,
+                            },
+                        },
+                        ConfigNode {
+                            keyword: "iifname",
+                            args: [
+                                "lo",
+                                "accept",
+                            ],
+                            children: [],
+                            span: SourceSpan {
+                                file: "regles.nft",
+                                line: 18,
+                                end_line: None,
+                            },
+                        },
+                        ConfigNode {
+                            keyword: "ip",
+                            args: [
+                                "saddr",
+                                "$net_admin",
+                                "tcp",
+                                "dport",
+                                "{",
+                                "22",
+                                ",",
+                                "443",
+                                "}",
+                                "accept",
+                            ],
+                            children: [],
+                            span: SourceSpan {
+                                file: "regles.nft",
+                                line: 19,
+                                end_line: None,
+                            },
+                        },
+                    ],
+                    span: SourceSpan {
+                        file: "regles.nft",
+                        line: 15,
+                        end_line: Some(
+                            20,
+                        ),
+                    },
+                },
+                ConfigNode {
+                    keyword: "chain",
+                    args: [
+                        "transit",
+                    ],
+                    children: [
+                        ConfigNode {
+                            keyword: "type",
+                            args: [
+                                "filter",
+                                "hook",
+                                "forward",
+                                "priority",
+                                "0",
+                            ],
+                            children: [],
+                            span: SourceSpan {
+                                file: "regles.nft",
+                                line: 23,
+                                end_line: None,
+                            },
+                        },
+                        ConfigNode {
+                            keyword: "policy",
+                            args: [
+                                "drop",
+                            ],
+                            children: [],
+                            span: SourceSpan {
+                                file: "regles.nft",
+                                line: 23,
+                                end_line: None,
+                            },
+                        },
+                        ConfigNode {
+                            keyword: "iifname",
+                            args: [
+                                "lan0",
+                                "oifname",
+                                "wan0",
+                                "jump",
+                                "sortie_lan",
+                            ],
+                            children: [],
+                            span: SourceSpan {
+                                file: "regles.nft",
+                                line: 24,
+                                end_line: None,
+                            },
+                        },
+                    ],
+                    span: SourceSpan {
+                        file: "regles.nft",
+                        line: 22,
+                        end_line: Some(
+                            25,
+                        ),
+                    },
+                },
+            ],
+            span: SourceSpan {
+                file: "regles.nft",
+                line: 8,
+                end_line: Some(
+                    26,
+                ),
+            },
+        },
+        ConfigNode {
+            keyword: "include",
+            args: [
+                "extra.nft",
+            ],
+            children: [],
+            span: SourceSpan {
+                file: "regles.nft",
+                line: 28,
+                end_line: None,
+            },
+        },
+    ],
+    file: "regles.nft",
+}

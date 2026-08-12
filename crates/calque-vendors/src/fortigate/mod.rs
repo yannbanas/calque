@@ -68,6 +68,14 @@ impl FortigateAdapter {
 }
 
 impl VendorAdapter for FortigateAdapter {
+    fn label(&self) -> &'static str {
+        "FortiGate (CLI)"
+    }
+
+    fn import_str(&self, raw: &str, file: &str) -> Result<AdapterOutput, Vec<Diagnostic>> {
+        FortigateAdapter::import_str(self, raw, file)
+    }
+
     fn vendor(&self) -> Vendor {
         Vendor::Fortigate
     }

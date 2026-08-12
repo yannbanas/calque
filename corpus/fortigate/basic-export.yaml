@@ -1,0 +1,99 @@
+#config-version=FGT60F-7.0.5-FW-build0304-220328:opmode=0:vdom=0:user=admin
+#conf_file_ver=000000000000001
+# Configuration fictive et anonyme — fixture de test Calque.
+# Export YAML équivalent de basic.conf ; adressage RFC1918 inventé.
+system_global:
+    hostname: "fw-lab-01"
+system_interface:
+    - lan:
+        vdom: "root"
+        ip: [10.10.1.1, 255.255.255.0]
+        allowaccess: [ping, https, ssh]
+        type: physical
+        role: lan
+    - dmz:
+        vdom: "root"
+        ip: [10.10.2.1, 255.255.255.0]
+        allowaccess: [ping]
+        type: physical
+        role: dmz
+    - wan:
+        vdom: "root"
+        ip: [10.200.0.2, 255.255.255.252]
+        type: physical
+        role: wan
+system_zone:
+    - z-dmz:
+        interface: "dmz"
+router_static:
+    - 1:
+        gateway: 10.200.0.1
+        device: "wan"
+        distance: 10
+firewall_address:
+    - h-srv-web:
+        subnet: [10.10.2.10, 255.255.255.255]
+    - r-postes:
+        type: iprange
+        start-ip: 10.10.1.50
+        end-ip: 10.10.1.69
+firewall_addrgrp:
+    - g-serveurs:
+        member: ["h-srv-web", "r-postes"]
+firewall_service_custom:
+    - TCP-8443:
+        tcp-portrange: 8443
+    - APP-SYNC:
+        tcp-portrange: 7000-7010:1024-65535
+        udp-portrange: 7000
+firewall_service_group:
+    - g-apps:
+        member: ["TCP-8443", "APP-SYNC"]
+firewall_policy:
+    - 1:
+        name: "lan-vers-wan"
+        srcintf: "lan"
+        dstintf: "wan"
+        srcaddr: "all"
+        dstaddr: "all"
+        action: accept
+        schedule: "always"
+        service: "ALL"
+        nat: enable
+    - 2:
+        name: "lan-vers-dmz-web"
+        srcintf: "lan"
+        dstintf: "z-dmz"
+        srcaddr: "r-postes"
+        dstaddr: "h-srv-web"
+        action: accept
+        schedule: "always"
+        service: "TCP-8443"
+    - 3:
+        name: "dmz-isolement"
+        srcintf: "z-dmz"
+        dstintf: "lan"
+        srcaddr: "all"
+        dstaddr: "all"
+        action: deny
+        schedule: "always"
+        service: "ALL"
+    - 4:
+        name: "ancienne-regle"
+        srcintf: "lan"
+        dstintf: "wan"
+        srcaddr: "g-serveurs"
+        dstaddr: "all"
+        action: accept
+        schedule: "always"
+        service: "g-apps"
+        status: disable
+    - 5:
+        name: "dmz-vers-wan"
+        srcintf: "z-dmz"
+        dstintf: "wan"
+        srcaddr: "h-srv-web"
+        dstaddr: "all"
+        action: accept
+        schedule: "always"
+        service: "ALL"

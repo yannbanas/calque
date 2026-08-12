@@ -45,6 +45,9 @@
 
 pub mod cisco_ios;
 pub mod fortigate;
+pub mod fortigate_yaml;
+pub mod nftables;
+pub mod opnsense;
 
 use calque_model::{Device, Diagnostic, Fidelity, Vendor};
 
@@ -133,12 +136,24 @@ pub struct AdapterOutput {
 pub trait VendorAdapter {
     fn vendor(&self) -> Vendor;
 
+    /// Libellé humain de l'ADAPTATEUR (pas seulement du constructeur) :
+    /// deux adaptateurs peuvent servir le même constructeur sous deux
+    /// formats (ex. FortiGate CLI et FortiGate export YAML) — les messages
+    /// de détection doivent pouvoir les distinguer.
+    fn label(&self) -> &'static str;
+
     /// Reconnaissance automatique du constructeur à partir du texte brut.
     fn detect(&self, raw: &str) -> Confidence;
 
     /// Convertit l'arbre générique (couche 1, §6.1) en représentation
     /// intermédiaire, avec sa fidélité (§6.3).
     fn to_ir(&self, tree: &ConfigTree) -> Result<AdapterOutput, Vec<Diagnostic>>;
+
+    /// Chaîne complète : couche 1 propre à l'adaptateur + `to_ir`.
+    /// C'est LE point d'entrée de l'import : la sélection d'adaptateur se
+    /// fait par valeur de `detect`, jamais par `Vendor` (deux adaptateurs
+    /// peuvent partager le même constructeur).
+    fn import_str(&self, raw: &str, file: &str) -> Result<AdapterOutput, Vec<Diagnostic>>;
 }
 
 /// Tous les adaptateurs connus, dans l'ordre de la feuille de route (§6.4).
@@ -146,6 +161,9 @@ pub trait VendorAdapter {
 pub fn all_adapters() -> Vec<Box<dyn VendorAdapter>> {
     vec![
         Box::new(fortigate::FortigateAdapter),
+        Box::new(fortigate_yaml::FortigateYamlAdapter),
         Box::new(cisco_ios::CiscoIosAdapter),
+        Box::new(opnsense::OpnsenseAdapter),
+        Box::new(nftables::NftablesAdapter),
     ]
 }

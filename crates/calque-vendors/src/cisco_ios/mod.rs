@@ -101,6 +101,14 @@ impl CiscoIosAdapter {
 }
 
 impl VendorAdapter for CiscoIosAdapter {
+    fn label(&self) -> &'static str {
+        "Cisco IOS"
+    }
+
+    fn import_str(&self, raw: &str, file: &str) -> Result<AdapterOutput, Vec<Diagnostic>> {
+        CiscoIosAdapter::import_str(self, raw, file)
+    }
+
     fn vendor(&self) -> Vendor {
         Vendor::CiscoIos
     }

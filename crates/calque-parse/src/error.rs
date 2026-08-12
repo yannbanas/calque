@@ -36,6 +36,33 @@ pub enum ParseError {
         delim: String,
     },
 
+    /// Document XML syntaxiquement invalide : balisage mal formé, balise
+    /// fermante non appariée, attribut illisible, ou entité inconnue
+    /// (les entités définies par une DTD ne sont JAMAIS résolues — voir
+    /// `xml.rs`). Le message vient du lecteur XML.
+    #[error("{file}, ligne {line} : XML malformé : {message}")]
+    MalformedXml {
+        file: String,
+        line: u32,
+        message: String,
+    },
+
+    /// Accolade fermante `}` rencontrée alors qu'aucun bloc n'est ouvert
+    /// (formats à accolades : nftables).
+    #[error("{file}, ligne {line} : accolade fermante « }} » sans bloc ouvert")]
+    OrphanCloseBrace { file: String, line: u32 },
+
+    /// Ligne qui ne correspond à aucune forme attendue du format
+    /// (export YAML FortiOS : `clé:`, `clé: valeur`, `- nom:`).
+    #[error("{file}, ligne {line} : ligne inattendue — {detail}")]
+    UnexpectedLine {
+        file: String,
+        line: u32,
+        /// Ce qui manque ou déborde, sans jamais citer la VALEUR de la
+        /// ligne (elle pourrait porter un secret, §11.4).
+        detail: String,
+    },
+
     /// Imbrication plus profonde que la limite de sûreté (§11.3 : une
     /// entrée hostile ne doit pas pouvoir construire un arbre dont la
     /// profondeur ferait déborder la pile des traitements récursifs en
@@ -60,6 +87,9 @@ impl ParseError {
             | ParseError::UnclosedBlock { file, .. }
             | ParseError::UnterminatedQuote { file, .. }
             | ParseError::UnterminatedBanner { file, .. }
+            | ParseError::MalformedXml { file, .. }
+            | ParseError::OrphanCloseBrace { file, .. }
+            | ParseError::UnexpectedLine { file, .. }
             | ParseError::TooDeep { file, .. } => file,
         }
     }
@@ -72,6 +102,9 @@ impl ParseError {
             | ParseError::UnclosedBlock { line, .. }
             | ParseError::UnterminatedQuote { line, .. }
             | ParseError::UnterminatedBanner { line, .. }
+            | ParseError::MalformedXml { line, .. }
+            | ParseError::OrphanCloseBrace { line, .. }
+            | ParseError::UnexpectedLine { line, .. }
             | ParseError::TooDeep { line, .. } => *line,
         }
     }

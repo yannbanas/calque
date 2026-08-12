@@ -5,11 +5,12 @@
 use std::collections::HashMap;
 use std::net::Ipv4Addr;
 
-use calque_parse::{fortigate, ConfigNode};
+use calque_parse::{fortigate, fortigate_yaml, ConfigNode};
 use calque_scrub::Scrubber;
 use ipnet::Ipv4Net;
 
 const FIXTURE: &str = include_str!("../../../corpus/fortigate/basic.conf");
+const FIXTURE_YAML: &str = include_str!("../../../corpus/fortigate/basic-export.yaml");
 
 /// Tous les noms choisis par l'utilisateur dans la fixture.
 const NOMS_ORIGINAUX: &[&str] = &[
@@ -179,6 +180,222 @@ fn fixture_relations_de_sous_reseau_preservees() {
     for a in ADRESSES_ORIGINALES {
         assert_eq!(m(a).octets()[0], 10, "{a} sorti du 10/8");
     }
+}
+
+// ---------------------------------------------------------------------
+// (a bis) L'export YAML FortiOS : mêmes garanties que le format CLI
+// ---------------------------------------------------------------------
+
+#[test]
+fn yaml_format_reconnu_et_plus_aucun_nom_ni_adresse_d_origine() {
+    let mut s = Scrubber::new();
+    let (sortie, rapport) = s.scrub_avec_rapport(FIXTURE_YAML);
+
+    // Le cas réel qui a motivé ce durcissement : l'export YAML est
+    // désormais un format RECONNU de la passe 1.
+    assert!(rapport.format_reconnu);
+    assert_eq!(rapport.format, Some("fortigate-yaml"));
+
+    for nom in NOMS_ORIGINAUX {
+        if matches!(*nom, "lan" | "dmz" | "wan") {
+            // `lan`/`dmz`/`wan` existent AUSSI comme valeurs de `role:`
+            // (énumérations constructeur, jamais touchées) : plus aucune
+            // occurrence citée (référence) NI déclarée (`- lan:`).
+            assert!(
+                !sortie.contains(&format!("\"{nom}\"")),
+                "référence citée à {nom} restée"
+            );
+            assert!(
+                !sortie.contains(&format!("- {nom}:")),
+                "déclaration `- {nom}:` restée"
+            );
+        } else {
+            assert!(!sortie.contains(nom), "nom {nom} resté dans la sortie");
+        }
+    }
+    // Les énumérations, elles, sont intactes.
+    for garde in [
+        "role: lan",
+        "role: dmz",
+        "role: wan",
+        "action: accept",
+        "action: deny",
+        "\"all\"",
+        "\"ALL\"",
+        "\"always\"",
+    ] {
+        assert!(sortie.contains(garde), "{garde} aurait dû rester");
+    }
+
+    // Les adresses : absentes en tant que lexèmes entiers ; les masques
+    // qui les suivent sont intacts.
+    let lexemes = lexemes_numeriques(&sortie);
+    for adresse in ADRESSES_ORIGINALES {
+        assert!(!lexemes.contains(adresse), "adresse {adresse} restée");
+    }
+    for masque in ["255.255.255.0", "255.255.255.252", "255.255.255.255"] {
+        assert!(lexemes.contains(&masque), "masque {masque} altéré");
+    }
+}
+
+#[test]
+fn yaml_la_sortie_reparse_en_un_arbre_de_meme_forme() {
+    let mut s = Scrubber::new();
+    let sortie = s.scrub(FIXTURE_YAML);
+
+    let avant = fortigate_yaml::parse(FIXTURE_YAML, "avant.yaml").expect("fixture valide");
+    let apres =
+        fortigate_yaml::parse(&sortie, "apres.yaml").expect("la sortie doit rester analysable");
+
+    assert_eq!(avant.roots.len(), apres.roots.len());
+    for (a, b) in avant.roots.iter().zip(apres.roots.iter()) {
+        assert!(
+            meme_forme(a, b),
+            "forme altérée sous `{} {}`",
+            a.keyword,
+            a.args_joined()
+        );
+    }
+}
+
+#[test]
+fn yaml_relations_de_sous_reseau_preservees() {
+    let mut s = Scrubber::new();
+    s.scrub(FIXTURE_YAML);
+    let t = table(&s);
+    let m = |o: &str| -> Ipv4Addr { t[o].parse().expect("remplacement IPv4") };
+
+    // Même /24 pour les trois adresses du LAN, /24 distinct (même /16)
+    // pour la DMZ, /30 commun à l'interface wan et sa passerelle.
+    let reseau = Ipv4Net::new(m("10.10.1.1"), 24).unwrap().trunc();
+    assert!(reseau.contains(&m("10.10.1.50")));
+    assert!(reseau.contains(&m("10.10.1.69")));
+    assert!(!reseau.contains(&m("10.10.2.1")));
+    let seize = Ipv4Net::new(m("10.10.1.1"), 16).unwrap().trunc();
+    assert!(seize.contains(&m("10.10.2.1")));
+    let trente = Ipv4Net::new(m("10.200.0.2"), 30).unwrap().trunc();
+    assert!(trente.contains(&m("10.200.0.1")));
+}
+
+#[test]
+fn yaml_idempotence_et_coherence_avec_le_format_cli() {
+    let mut s = Scrubber::new();
+    let une = s.scrub(FIXTURE_YAML);
+    // Re-scruber la sortie ne change plus rien.
+    assert_eq!(s.scrub(&une), une);
+    // Deux appels identiques : même sortie.
+    assert_eq!(s.scrub(FIXTURE_YAML), une);
+
+    // Le même parc en CLI et en YAML sur un même Scrubber : mêmes
+    // remplacements partout (la table est partagée).
+    let mut parc = Scrubber::new();
+    parc.scrub(FIXTURE);
+    let t = table(&parc);
+    let sortie = parc.scrub(FIXTURE_YAML);
+    assert!(sortie.contains(&format!("- {}:", t["h-srv-web"])));
+    assert!(sortie.contains(&format!("srcintf: \"{}\"", t["lan"])));
+    assert!(sortie.contains(&format!("hostname: \"{}\"", t["fw-lab-01"])));
+}
+
+#[test]
+fn yaml_secrets_et_certificats_caviardes_noms_anonymises() {
+    let mut s = Scrubber::new();
+    let entree = concat!(
+        "#config-version=FGT60F-7.0.5-FW-build0304-220328:opmode=0:vdom=0:user=admin\n",
+        "system_snmp_sysinfo:\n",
+        "    location: \"Salle B12\"\n",
+        "    contact-info: \"equipe-reseau\"\n",
+        "system_ddns:\n",
+        "    - maj-dns:\n",
+        "        ddns-domain: \"fw.exemple.test\"\n",
+        "system_admin:\n",
+        "    - admin:\n",
+        "        password: [ENC, U0VDUkVUMTIz]\n",
+        "        old-password: [ENC, QU5DSUVOOTk=]\n",
+        "vpn_ipsec_phase1-interface:\n",
+        "    - vers-site-b:\n",
+        "        psksecret: [ENC, Q0xFRlBBUlRBR0VF]\n",
+        "vpn_certificate_local:\n",
+        "    - cert-un:\n",
+        "        private-key: \"-----BEGIN RSA PRIVATE KEY-----PEMSECRET-----END RSA PRIVATE KEY-----\"\n",
+        "        certificate: \"-----BEGIN CERTIFICATE-----FGT60F0000000001-----END CERTIFICATE-----\"\n",
+        "user_ldap:\n",
+        "    - srv-annuaire:\n",
+        "        username: \"lecteur-annuaire\"\n",
+        "        dn: \"dc=exemple,dc=test\"\n",
+        "        password: [ENC, TERBUFNFQ1JFVA==]\n"
+    );
+    let (sortie, rapport) = s.scrub_avec_rapport(entree);
+    assert!(rapport.format_reconnu);
+
+    // Secrets et blobs : disparus, et JAMAIS dans le mapping.
+    for secret in [
+        "U0VDUkVUMTIz",
+        "QU5DSUVOOTk=",
+        "Q0xFRlBBUlRBR0VF",
+        "PEMSECRET",
+        "TERBUFNFQ1JFVA==",
+        "BEGIN RSA PRIVATE KEY",
+        "FGT60F0000000001", // numéro de série dans le certificat
+    ] {
+        assert!(!sortie.contains(secret), "secret {secret} resté");
+        for (o, r) in s.mapping() {
+            assert!(
+                !o.contains(secret) && !r.contains(secret),
+                "secret {secret} dans le mapping"
+            );
+        }
+    }
+    assert!(sortie.contains("password: SUPPRIME"));
+    assert!(sortie.contains("old-password: SUPPRIME"));
+    assert!(sortie.contains("psksecret: SUPPRIME"));
+    assert!(sortie.contains("private-key: SUPPRIME"));
+    // Certificat : motif DISTINCT, documenté.
+    assert!(sortie.contains("certificate: SUPPRIME-CERT"));
+
+    // Les identifiants, eux, sont anonymisés (pas des secrets).
+    for nom in [
+        "Salle B12",
+        "equipe-reseau",
+        "fw.exemple.test",
+        "vers-site-b",
+        "cert-un",
+        "srv-annuaire",
+        "lecteur-annuaire",
+        "dc=exemple,dc=test",
+        "maj-dns",
+    ] {
+        assert!(!sortie.contains(nom), "identifiant {nom} resté");
+    }
+    // Et la sortie reparse toujours comme un export YAML.
+    fortigate_yaml::parse(&sortie, "apres.yaml").expect("la sortie doit rester analysable");
+}
+
+// ---------------------------------------------------------------------
+// (a ter) Format inconnu : le rapport le dit, l'appelant peut prévenir
+// ---------------------------------------------------------------------
+
+#[test]
+fn format_inconnu_signale_dans_le_rapport() {
+    let mut s = Scrubber::new();
+    let (_, rapport) = s.scrub_avec_rapport(
+        "Bonjour,\n\nceci est un texte quelconque qui n'est la configuration de rien.\n\
+         Le serveur 10.9.9.9 repond au ping.\n",
+    );
+    assert!(!rapport.format_reconnu, "rien ici n'est un format connu");
+    assert_eq!(rapport.format, None);
+
+    // Les formats connus, eux, sont bien étiquetés.
+    let mut s = Scrubber::new();
+    let (_, rapport) = s.scrub_avec_rapport(FIXTURE);
+    assert_eq!(rapport.format, Some("fortigate"));
+    let mut s = Scrubber::new();
+    let (_, rapport) = s.scrub_avec_rapport(FIXTURE_YAML);
+    assert_eq!(rapport.format, Some("fortigate-yaml"));
+    let mut s = Scrubber::new();
+    let ios = "hostname r1\ninterface GigabitEthernet0/0\n ip address 10.0.0.1 255.255.255.0\n";
+    let (_, rapport) = s.scrub_avec_rapport(ios);
+    assert_eq!(rapport.format, Some("cisco-ios"));
 }
 
 // ---------------------------------------------------------------------

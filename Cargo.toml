@@ -10,6 +10,7 @@ members = [
     "crates/calque-vendors",
     "crates/calque-report",
     "crates/calque-scrub",
+    "crates/calque-collect",
     "crates/calque-cli",
 ]
 # Les cibles cargo-fuzz ont leur propre espace de travail.
@@ -30,6 +31,8 @@ calque-parse = { path = "crates/calque-parse" }
 calque-vendors = { path = "crates/calque-vendors" }
 calque-report = { path = "crates/calque-report" }
 calque-scrub = { path = "crates/calque-scrub" }
+calque-collect = { path = "crates/calque-collect" }
+quick-xml = "0.37"
 
 ipnet = { version = "2", features = ["serde"] }
 serde = { version = "1", features = ["derive"] }

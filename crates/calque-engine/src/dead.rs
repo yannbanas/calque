@@ -23,10 +23,17 @@
 //! [`MAX_UNION_CUBES`] pavés, l'analyse s'abstient pour cette règle (elle
 //! n'est PAS déclarée morte) : abstention sûre, jamais un faux positif.
 //!
-//! Fidélité (§6.3) : une règle irrésoluble (objet manquant, cycle) rend
-//! une erreur — pas de rapport partiellement deviné.
+//! Fidélité (§6.3) : une règle irrésoluble (objet manquant — fqdn,
+//! geography… —, cycle) est EXCLUE de l'analyse avec un diagnostic : elle
+//! n'est jamais déclarée morte, et elle ne compte pas comme masque (le
+//! couvert ne peut que rétrécir — abstention sûre, jamais un faux
+//! positif). L'analyse continue sur le reste : une configuration réelle
+//! contient presque toujours quelques objets irrésolubles hors ligne, et
+//! un rapport partiel honnête vaut mieux qu'aucun rapport.
 
-use calque_model::{Action, ConcretePacket, Device, PolicyId, Rule, RuleId, SourceSpan};
+use calque_model::{
+    Action, ConcretePacket, Device, Diagnostic, PolicyId, Rule, RuleId, SourceSpan,
+};
 use calque_space::{HeaderSet, HeaderSpace};
 use serde::{Deserialize, Serialize};
 
@@ -71,21 +78,54 @@ pub struct DeadRule {
     pub sample: Option<ConcretePacket>,
 }
 
+/// Le résultat complet : les règles mortes ET les règles exclues de
+/// l'analyse (irrésolubles hors ligne), pour un rapport honnête.
+#[derive(Debug, Clone, Default)]
+pub struct DeadRulesReport {
+    pub dead: Vec<DeadRule>,
+    /// Une entrée par règle exclue (objet irrésoluble, cycle…), avec le
+    /// span de la règle.
+    pub diagnostics: Vec<Diagnostic>,
+}
+
+/// Détecte les règles mortes de TOUTES les politiques de l'équipement.
+/// Compatibilité : rend seulement les règles mortes ; préférer
+/// [`dead_rules_report`] qui expose aussi les exclusions.
+pub fn dead_rules(device: &Device) -> Result<Vec<DeadRule>, EvalError> {
+    Ok(dead_rules_report(device).dead)
+}
+
 /// Détecte les règles mortes de TOUTES les politiques de l'équipement.
 ///
 /// Les politiques sont analysées indépendamment (y compris les cibles de
 /// sauts, qui sont des politiques de l'équipement comme les autres).
-pub fn dead_rules(device: &Device) -> Result<Vec<DeadRule>, EvalError> {
+pub fn dead_rules_report(device: &Device) -> DeadRulesReport {
     let mut out = Vec::new();
+    let mut diagnostics = Vec::new();
     for policy in device.policies.values() {
         // Résolution unique de chaque pavé (les objets sont résolus tard,
-        // §3.3) ; toute règle irrésoluble interrompt honnêtement l'analyse.
-        let mut sets = Vec::with_capacity(policy.rules.len());
+        // §3.3) ; une règle irrésoluble est exclue avec diagnostic — voir
+        // la doc de module pour l'argument de sûreté.
+        let mut sets: Vec<Option<HeaderSet>> = Vec::with_capacity(policy.rules.len());
         for rule in &policy.rules {
-            sets.push(rule_headerset(&device.objects, &rule.matches)?);
+            match rule_headerset(&device.objects, &rule.matches) {
+                Ok(hs) => sets.push(Some(hs)),
+                Err(e) => {
+                    diagnostics.push(Diagnostic::warning(
+                        format!(
+                            "règle « {} » (politique « {} ») exclue de l'analyse : {e}",
+                            rule.id, policy.id
+                        ),
+                        Some(rule.source.clone()),
+                    ));
+                    sets.push(None);
+                }
+            }
         }
         for (i, rule) in policy.rules.iter().enumerate() {
-            let hs = &sets[i];
+            let Some(hs) = &sets[i] else {
+                continue; // irrésoluble : jamais déclarée morte.
+            };
             if hs.is_empty() {
                 out.push(DeadRule {
                     policy: policy.id.clone(),
@@ -108,16 +148,21 @@ pub fn dead_rules(device: &Device) -> Result<Vec<DeadRule>, EvalError> {
                 if !zone_covers(prior, rule) {
                     continue;
                 }
+                // Un masque irrésoluble ne compte pas : le couvert ne peut
+                // que rétrécir, l'abstention reste sûre.
+                let Some(prior_set) = &sets[j] else {
+                    continue;
+                };
                 // Test de disjonction direct (sans construire l'intersection) :
                 // c'est le test exécuté n²/2 fois, il doit rester bon marché.
-                if hs.is_disjoint(&sets[j]) {
+                if hs.is_disjoint(prior_set) {
                     continue;
                 }
                 maskers.push(Masker {
                     rule: prior.id.clone(),
                     source: prior.source.clone(),
                 });
-                cover = cover.union(&sets[j]);
+                cover = cover.union(prior_set);
                 if cover.cubes().len() > MAX_UNION_CUBES {
                     abstained = true;
                     break;
@@ -141,7 +186,10 @@ pub fn dead_rules(device: &Device) -> Result<Vec<DeadRule>, EvalError> {
             }
         }
     }
-    Ok(out)
+    DeadRulesReport {
+        dead: out,
+        diagnostics,
+    }
 }
 
 /// La règle antérieure s'applique-t-elle dans TOUS les contextes de zones
@@ -355,23 +403,44 @@ mod tests {
         assert!(find(&dead, "2").is_none());
     }
 
-    /// Une règle irrésoluble rend une erreur, jamais un rapport deviné.
+    /// Une règle irrésoluble est EXCLUE avec diagnostic : jamais déclarée
+    /// morte, jamais comptée comme masque, et l'analyse continue — un
+    /// rapport partiel honnête, pas une erreur bloquante ni une
+    /// supposition (§6.3).
     #[test]
-    fn regle_irresoluble_rend_une_erreur() {
-        let device = device_with(vec![rule(
-            "1",
-            vec![AddrExpr::Object(ObjectId::new("ABSENT"))],
-            vec![],
-            vec![],
-            None,
-            None,
-            Action::Accept,
-            10,
-        )]);
-        assert!(matches!(
-            dead_rules(&device),
-            Err(EvalError::AddrObjectMissing { .. })
-        ));
+    fn regle_irresoluble_exclue_avec_diagnostic() {
+        let device = device_with(vec![
+            rule(
+                "1",
+                vec![AddrExpr::Object(ObjectId::new("ABSENT"))],
+                vec![],
+                vec![],
+                None,
+                None,
+                Action::Accept,
+                10,
+            ),
+            // Strictement incluse dans ce que couvrirait la règle 1 si
+            // elle était résoluble — mais un masque irrésoluble ne compte
+            // pas : la règle 2 ne doit PAS être déclarée morte.
+            rule(
+                "2",
+                vec![AddrExpr::Net(net("10.0.10.0/24"))],
+                vec![],
+                vec![],
+                None,
+                None,
+                Action::Accept,
+                20,
+            ),
+        ]);
+        let report = dead_rules_report(&device);
+        assert!(report.dead.is_empty(), "{:?}", report.dead);
+        assert_eq!(report.diagnostics.len(), 1);
+        assert!(report.diagnostics[0].message.contains("« 1 »"));
+        assert!(report.diagnostics[0].message.contains("ABSENT"));
+        // L'API de compatibilité suit la même sémantique.
+        assert!(dead_rules(&device).expect("analyse").is_empty());
     }
 
     /// Le masquage peut être COLLECTIF : deux moitiés antérieures couvrent

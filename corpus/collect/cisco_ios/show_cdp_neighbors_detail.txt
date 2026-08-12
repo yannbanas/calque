@@ -1,0 +1,41 @@
+-------------------------
+Device ID: sw-acces-01.exemple.local
+Entry address(es):
+  IP address: 10.0.99.11
+Platform: cisco WS-C2960-24TT-L,  Capabilities: Switch IGMP
+Interface: GigabitEthernet0/1,  Port ID (outgoing port): GigabitEthernet0/24
+Holdtime : 132 sec
+
+Version :
+Cisco IOS Software, C2960 Software (C2960-LANBASEK9-M), Version 15.0(2)SE11, RELEASE SOFTWARE (fc3)
+Technical Support: http://www.cisco.com/techsupport
+Copyright (c) 1986-2017 by Cisco Systems, Inc.
+
+advertisement version: 2
+Protocol Hello:  OUI=0x00000C, Protocol ID=0x0112; payload len=27, value=00000000FFFFFFFF010221FF000000000000002699 15C3A0FF0000
+VTP Management Domain: ''
+Native VLAN: 1
+Duplex: full
+Management address(es):
+  IP address: 10.0.99.11
+
+-------------------------
+Device ID: rt-agence-02(FDO2233A1BC)
+Entry address(es):
+  IP address: 10.0.98.1
+Platform: cisco ISR4331/K9,  Capabilities: Router Source-Route-Bridge
+Interface: GigabitEthernet0/2,  Port ID (outgoing port): Gi0/0/1
+Holdtime : 154 sec
+
+Version :
+Cisco IOS XE Software, Version 16.09.08
+Cisco IOS Software [Fuji], ISR Software (X86_64_LINUX_IOSD-UNIVERSALK9-M), Version 16.9.8, RELEASE SOFTWARE (fc4)
+
+advertisement version: 2
+VTP Management Domain: ''
+Duplex: full
+Management address(es):
+  IP address: 10.0.98.1
+
+
+Total cdp entries displayed : 2

@@ -1,15 +1,18 @@
 //! Passe 1 : collecte des noms choisis par l'utilisateur, en s'appuyant
 //! sur la STRUCTURE (jamais sur du flair lexical) :
 //!
-//! - FortiGate : l'arbre de calque-parse. Seuls sont des noms les
-//!   arguments d'`edit` (interfaces, zones, objets d'adresse, services,
-//!   plannings, tunnels, utilisateurs...) et les valeurs de certaines clés
-//!   `set` à valeur libre : `hostname`, `alias`, `description`, `comment`,
-//!   `comments`, `fqdn`, et `name` (règles de pare-feu). Les MOTS-CLÉS et
-//!   les valeurs d'énumération (`accept`, `deny`, `enable`, `lan`...) ne
-//!   sont jamais collectés. Si l'analyse échoue (blocs cités multi-lignes
-//!   d'une vraie configuration), un collecteur ligne à ligne indulgent
-//!   prend le relais avec les mêmes règles.
+//! - FortiGate (format CLI OU export YAML — les deux arbres de
+//!   calque-parse ont la même forme). Seuls sont des noms les arguments
+//!   d'`edit` (interfaces, zones, objets d'adresse, services, plannings,
+//!   tunnels, utilisateurs, administrateurs...) et les valeurs de
+//!   certaines clés `set` à valeur libre : `hostname`, `alias`,
+//!   `description`, `comment`, `comments`, `location`, `contact`,
+//!   `contact-info` (SNMP), `fqdn`, `ddns-domain`, `username`, `dn`
+//!   (LDAP), et `name` (règles de pare-feu). Les MOTS-CLÉS et les
+//!   valeurs d'énumération (`accept`, `deny`, `enable`, `lan`...) ne
+//!   sont jamais collectés. Si l'analyse CLI échoue (blocs cités
+//!   multi-lignes d'une vraie configuration), un collecteur ligne à
+//!   ligne indulgent prend le relais avec les mêmes règles.
 //! - Cisco IOS : l'arbre de calque-parse. `hostname`, noms d'ACL
 //!   (`ip access-list standard|extended`), `object-group`,
 //!   `zone security`, et les queues de `description`.
@@ -20,10 +23,10 @@
 
 use std::net::{Ipv4Addr, Ipv6Addr};
 
-use calque_parse::{cisco_ios, fortigate, ConfigNode};
+use calque_parse::{cisco_ios, fortigate, fortigate_yaml, ConfigNode};
 
 use crate::texte::{decouper_lexemes, est_anonyme};
-use crate::Scrubber;
+use crate::{RapportScrub, Scrubber};
 
 /// Où un nom peut être remplacé.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -59,34 +62,90 @@ fn type_pour_chemin(chemin: &str) -> &'static str {
         "addr"
     } else if chemin.starts_with("vpn") {
         "vpn"
-    } else if chemin.starts_with("user") {
+    } else if chemin.starts_with("user") || chemin.starts_with("system admin") {
         "user"
     } else {
         "obj"
     }
 }
 
+/// Le texte ressemble-t-il à une configuration Cisco IOS ? L'analyseur
+/// Cisco (par indentation) accepte à peu près n'importe quel texte : la
+/// reconnaissance du FORMAT exige en plus un motif caractéristique.
+fn ressemble_cisco(texte: &str) -> bool {
+    texte.lines().any(|l| {
+        let t = l.trim_start();
+        t.starts_with("hostname ")
+            || t.starts_with("interface ")
+            || t.starts_with("ip access-list")
+            || t.starts_with("access-list ")
+            || t.starts_with("object-group ")
+            || t.starts_with("zone security")
+            || t.starts_with("ip route ")
+            || t.starts_with("snmp-server ")
+            || t.starts_with("enable secret")
+            || t.starts_with("enable password")
+    })
+}
+
 impl Scrubber {
     /// Passe 1 complète sur un texte déjà expurgé de ses secrets.
-    pub(crate) fn collecter(&mut self, texte: &str) {
-        match fortigate::parse(texte, "scrub") {
-            Ok(arbre) if arbre.roots.iter().any(|n| n.keyword == "config") => {
+    /// Renvoie ce qui a été reconnu : quand `format_reconnu` est faux,
+    /// AUCUNE collecte structurelle n'a pu avoir lieu et l'appelant doit
+    /// prévenir que l'anonymisation est probablement incomplète.
+    pub(crate) fn collecter(&mut self, texte: &str) -> RapportScrub {
+        // 1. FortiGate au format CLI, par l'arbre.
+        if let Ok(arbre) = fortigate::parse(texte, "scrub") {
+            if arbre.roots.iter().any(|n| n.keyword == "config") {
                 self.visiter_fortigate(&arbre.roots, "");
-            }
-            Ok(_) | Err(_) => {
-                let ressemble_fortigate = texte.lines().any(|l| {
-                    let t = l.trim_start();
-                    t == "config" || t.starts_with("config ")
-                });
-                if ressemble_fortigate {
-                    self.collecter_fortigate_lignes(texte);
-                } else if let Ok(arbre) = cisco_ios::parse(texte, "scrub") {
-                    self.collecter_cisco(&arbre.roots);
-                }
-                // Sinon : aucun nom collecté ; adresses et secrets sont
-                // tout de même traités par les autres passes.
+                return RapportScrub::reconnu("fortigate");
             }
         }
+        // 2. Export YAML FortiOS : l'arbre a la MÊME forme que le CLI
+        // (config/edit/set), la collecte structurelle est partagée.
+        if let Ok(arbre) = fortigate_yaml::parse(texte, "scrub") {
+            let structure = arbre
+                .roots
+                .iter()
+                .any(|n| n.keyword == "config" && !n.children.is_empty());
+            if structure {
+                // On collecte dans tous les cas (plus de collecte = plus
+                // sûr), mais on ne PRÉTEND reconnaître l'export FortiOS
+                // qu'avec son en-tête ou de vraies entrées `- nom:`.
+                self.visiter_fortigate(&arbre.roots, "");
+                let export_fortios = texte.contains("#config-version=")
+                    || arbre
+                        .roots
+                        .iter()
+                        .any(|n| n.children.iter().any(|c| c.keyword == "edit"));
+                if export_fortios {
+                    return RapportScrub::reconnu("fortigate-yaml");
+                }
+                return RapportScrub::inconnu();
+            }
+        }
+        // 3. Repli FortiGate CLI ligne à ligne (blocs cités multi-lignes
+        // restants, exports abîmés...) : mêmes règles, en indulgent.
+        let ressemble_fortigate = texte.lines().any(|l| {
+            let t = l.trim_start();
+            t == "config" || t.starts_with("config ")
+        });
+        if ressemble_fortigate {
+            self.collecter_fortigate_lignes(texte);
+            return RapportScrub::reconnu("fortigate-degrade");
+        }
+        // 4. Cisco IOS. L'analyse par indentation réussit sur presque
+        // tout : la collecte a lieu dès qu'elle réussit (sûreté), mais le
+        // format n'est RECONNU qu'avec un motif caractéristique.
+        if let Ok(arbre) = cisco_ios::parse(texte, "scrub") {
+            self.collecter_cisco(&arbre.roots);
+            if ressemble_cisco(texte) {
+                return RapportScrub::reconnu("cisco-ios");
+            }
+        }
+        // Sinon : aucun nom collecté ; adresses et secrets sont tout de
+        // même traités par les autres passes — d'où l'avertissement.
+        RapportScrub::inconnu()
     }
 
     fn visiter_fortigate(&mut self, noeuds: &[ConfigNode], chemin: &str) {
@@ -113,15 +172,20 @@ impl Scrubber {
         }
     }
 
-    /// Clés `set` à valeur libre (communes aux deux collecteurs FortiGate).
+    /// Clés `set` à valeur libre (communes aux collecteurs FortiGate,
+    /// format CLI comme export YAML).
     fn collecter_valeur_libre(&mut self, cle: &str, valeur: &str, chemin: &str) {
         match cle {
             "hostname" => self.enregistrer_nom(valeur, "host", Portee::Libre),
             "alias" => self.enregistrer_nom(valeur, "alias", Portee::Libre),
-            "description" | "comment" | "comments" => {
+            // Textes libres : descriptions, localisation et contact SNMP.
+            "description" | "comment" | "comments" | "location" | "contact" | "contact-info" => {
                 self.enregistrer_nom(valeur, "desc", Portee::Citee);
             }
-            "fqdn" => self.enregistrer_nom(valeur, "fqdn", Portee::Libre),
+            "fqdn" | "ddns-domain" => self.enregistrer_nom(valeur, "fqdn", Portee::Libre),
+            // Identifiants LDAP/annuaire : compte de liaison et DN de base.
+            "username" => self.enregistrer_nom(valeur, "user", Portee::Libre),
+            "dn" => self.enregistrer_nom(valeur, "user", Portee::Citee),
             "name" if chemin.contains("policy") => {
                 self.enregistrer_nom(valeur, "regle", Portee::Citee);
             }

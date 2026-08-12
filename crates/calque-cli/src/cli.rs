@@ -43,6 +43,14 @@ pub enum Command {
     /// Anonymiser une ou plusieurs configurations (§11.4) : adresses, noms
     /// et identifiants remplacés de façon cohérente, secrets supprimés
     Scrub(ScrubArgs),
+    /// Collecter un équipement en ligne (SSH, LECTURE SEULE stricte) :
+    /// configuration + voisins LLDP/CDP, importés dans le projet (S7)
+    #[cfg(feature = "collect")]
+    Collect(crate::collect_cmd::CollectArgs),
+    /// Confronter le modèle au réel (§11.2) : les flux tcp de flows.yaml
+    /// sont testés par de vraies connexions TCP depuis cette machine
+    #[cfg(feature = "collect")]
+    Verify(crate::collect_cmd::VerifyArgs),
 }
 
 #[derive(Debug, clap::Args)]

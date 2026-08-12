@@ -54,6 +54,53 @@ fn projet_importe() -> TempDir {
 // import → model check
 // ---------------------------------------------------------------------------
 
+/// Non-régression du dispatch d'import : la sélection se fait par
+/// ADAPTATEUR (score de détection), jamais par `Vendor` — chacun des cinq
+/// formats du corpus doit s'importer avec son propre adaptateur. Le cas
+/// FortiGate export YAML vs CLI (même `Vendor`) est celui qui a cassé.
+#[test]
+fn import_dispatch_tous_les_formats_du_corpus() {
+    let fixtures: &[(&str, &str)] = &[
+        (
+            "basic.conf",
+            include_str!("../../../corpus/fortigate/basic.conf"),
+        ),
+        (
+            "basic-export.yaml",
+            include_str!("../../../corpus/fortigate/basic-export.yaml"),
+        ),
+        (
+            "cisco.conf",
+            include_str!("../../../corpus/cisco_ios/basic.conf"),
+        ),
+        (
+            "opnsense.xml",
+            include_str!("../../../corpus/opnsense/basic.xml"),
+        ),
+        (
+            "basic.nft",
+            include_str!("../../../corpus/nftables/basic.nft"),
+        ),
+    ];
+    for (nom, contenu) in fixtures {
+        let tmp = TempDir::new().expect("répertoire temporaire");
+        std::fs::write(tmp.path().join(nom), contenu).expect("écriture de la fixture");
+        let out = calque(tmp.path(), &["import", nom]);
+        assert_code(&out, 0);
+        let txt = stdout(&out);
+        assert!(
+            txt.contains("1 configuration(s) importée(s)"),
+            "import de {nom} : {txt}"
+        );
+        // Aucune fixture ne doit s'importer vide : le mauvais adaptateur
+        // produirait 0 interface (c'était le symptôme du bug).
+        assert!(
+            !txt.contains("(0 interface(s)"),
+            "import de {nom} vide — mauvais adaptateur choisi : {txt}"
+        );
+    }
+}
+
 #[test]
 fn import_puis_model_check_complet() {
     let tmp = projet_importe();
@@ -368,7 +415,7 @@ fn dead_rules_fixture_saine() {
     let txt = stdout(&out);
     assert!(txt.contains("Aucune règle morte"), "sortie : {txt}");
     assert!(
-        txt.contains("1 équipement(s) analysé(s), 0 règle(s) morte(s)."),
+        txt.contains("1 équipement(s) analysé(s), 0 règle(s) morte(s), 0 exclue(s)."),
         "sortie : {txt}"
     );
 }
@@ -406,7 +453,7 @@ fn dead_rules_detecte_une_regle_masquee() {
     assert!(txt.contains("ligne 82"), "la ligne du masque : {txt}");
     assert!(txt.contains("paquet témoin"), "le témoin : {txt}");
     assert!(
-        txt.contains("1 équipement(s) analysé(s), 1 règle(s) morte(s)."),
+        txt.contains("1 équipement(s) analysé(s), 1 règle(s) morte(s), 0 exclue(s)."),
         "sortie : {txt}"
     );
 }

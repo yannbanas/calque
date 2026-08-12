@@ -1,0 +1,195 @@
+<?xml version="1.0"?>
+<!-- Configuration fictive et anonyme - fixture de test Calque. -->
+<!-- Adressage RFC1918 invente ; aucun equipement ni nom reel. -->
+<opnsense>
+  <version>23.7.10</version>
+  <system>
+    <hostname>fw-opn-01</hostname>
+    <domain>lab.example</domain>
+    <timezone>Europe/Paris</timezone>
+    <dnsserver>10.10.1.53</dnsserver>
+    <webgui>
+      <protocol>https</protocol>
+    </webgui>
+  </system>
+  <interfaces>
+    <wan>
+      <if>vtnet0</if>
+      <descr>WAN</descr>
+      <enable>1</enable>
+      <ipaddr>10.200.0.2</ipaddr>
+      <subnet>30</subnet>
+      <gateway>GW_WAN</gateway>
+    </wan>
+    <lan>
+      <if>vtnet1</if>
+      <enable>1</enable>
+      <ipaddr>10.10.1.1</ipaddr>
+      <subnet>24</subnet>
+    </lan>
+    <opt1>
+      <if>vtnet2</if>
+      <descr>dmz</descr>
+      <enable>1</enable>
+      <ipaddr>10.10.2.1</ipaddr>
+      <subnet>24</subnet>
+    </opt1>
+  </interfaces>
+  <gateways>
+    <gateway_item>
+      <interface>wan</interface>
+      <gateway>10.200.0.1</gateway>
+      <name>GW_WAN</name>
+      <ipprotocol>inet</ipprotocol>
+      <defaultgw>1</defaultgw>
+      <descr>Passerelle du fournisseur</descr>
+    </gateway_item>
+    <gateway_item>
+      <interface>lan</interface>
+      <gateway>10.10.1.254</gateway>
+      <name>GW_LAB</name>
+      <ipprotocol>inet</ipprotocol>
+      <descr>Routeur du laboratoire</descr>
+    </gateway_item>
+  </gateways>
+  <staticroutes>
+    <route>
+      <network>10.30.0.0/16</network>
+      <gateway>GW_LAB</gateway>
+      <descr>Reseaux du laboratoire</descr>
+    </route>
+  </staticroutes>
+  <filter>
+    <rule uuid="c0a80101-0000-4000-8000-000000000001">
+      <type>pass</type>
+      <interface>lan</interface>
+      <ipprotocol>inet</ipprotocol>
+      <protocol>tcp</protocol>
+      <source>
+        <address>n_postes</address>
+      </source>
+      <destination>
+        <address>h_srv_web</address>
+        <port>8443</port>
+      </destination>
+      <descr>postes vers serveur web de la dmz</descr>
+    </rule>
+    <rule uuid="c0a80101-0000-4000-8000-000000000002">
+      <type>block</type>
+      <interface>opt1</interface>
+      <ipprotocol>inet</ipprotocol>
+      <quick>1</quick>
+      <source>
+        <network>opt1</network>
+      </source>
+      <destination>
+        <network>lan</network>
+      </destination>
+      <descr>isolement de la dmz</descr>
+    </rule>
+    <rule uuid="c0a80101-0000-4000-8000-000000000003">
+      <type>pass</type>
+      <interface>wan</interface>
+      <ipprotocol>inet</ipprotocol>
+      <protocol>tcp</protocol>
+      <source>
+        <any></any>
+      </source>
+      <destination>
+        <address>10.10.2.10</address>
+        <port>8443</port>
+      </destination>
+      <descr>flux publie via la redirection de port</descr>
+    </rule>
+    <rule uuid="c0a80101-0000-4000-8000-000000000004">
+      <disabled>1</disabled>
+      <type>pass</type>
+      <interface>lan</interface>
+      <ipprotocol>inet</ipprotocol>
+      <protocol>tcp</protocol>
+      <source>
+        <network>lan</network>
+      </source>
+      <destination>
+        <any/>
+      </destination>
+      <descr>ancienne regle http en clair</descr>
+    </rule>
+    <rule uuid="c0a80101-0000-4000-8000-000000000005">
+      <type>pass</type>
+      <interface>lan</interface>
+      <ipprotocol>inet</ipprotocol>
+      <statetype>keep state</statetype>
+      <source>
+        <network>lan</network>
+      </source>
+      <destination>
+        <any></any>
+      </destination>
+      <descr>sortie generale du lan</descr>
+    </rule>
+  </filter>
+  <nat>
+    <outbound>
+      <mode>automatic</mode>
+    </outbound>
+    <rule>
+      <interface>wan</interface>
+      <ipprotocol>inet</ipprotocol>
+      <protocol>tcp</protocol>
+      <source>
+        <any/>
+      </source>
+      <destination>
+        <network>wanip</network>
+        <port>443</port>
+      </destination>
+      <target>10.10.2.10</target>
+      <local-port>8443</local-port>
+      <descr>publication du serveur web de la dmz</descr>
+    </rule>
+  </nat>
+  <virtualip version="1.0.0"/>
+  <dhcpd>
+    <lan>
+      <enable>1</enable>
+      <range>
+        <from>10.10.1.100</from>
+        <to>10.10.1.199</to>
+      </range>
+    </lan>
+  </dhcpd>
+  <unbound>
+    <enable>1</enable>
+    <dnssec>1</dnssec>
+  </unbound>
+  <snmpd>
+    <syslocation>baie A1</syslocation>
+    <rocommunity>public</rocommunity>
+  </snmpd>
+  <OPNsense>
+    <Firewall>
+      <Alias version="1.0.1">
+        <aliases>
+          <alias uuid="c0a80101-0000-4000-8000-00000000a001">
+            <enabled>1</enabled>
+            <name>h_srv_web</name>
+            <type>host</type>
+            <content>10.10.2.10</content>
+            <categories/>
+            <descr>serveur web de la dmz</descr>
+          </alias>
+          <alias uuid="c0a80101-0000-4000-8000-00000000a002">
+            <enabled>1</enabled>
+            <name>n_postes</name>
+            <type>network</type>
+            <content>10.10.1.0/24
+10.10.3.0/24</content>
+            <categories/>
+            <descr>postes de travail</descr>
+          </alias>
+        </aliases>
+      </Alias>
+    </Firewall>
+  </OPNsense>
+</opnsense>

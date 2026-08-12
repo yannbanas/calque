@@ -1,0 +1,7 @@
+Portname             Chassis              System-Name        Port-ID                   TTL
+____________         _________________    _____________      ____________________      ____
+
+port1                00:26:99:15:c3:a0    sw-acces-01        Gi0/23                    117
+--More--        port3                00:aa:bb:cc:dd:ee    srv-hyperviseur    ens192                    112
+
+fw-agence-01 #

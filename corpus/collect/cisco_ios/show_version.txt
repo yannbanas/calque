@@ -1,0 +1,16 @@
+Cisco IOS Software, C2960X Software (C2960X-UNIVERSALK9-M), Version 15.2(7)E7, RELEASE SOFTWARE (fc2)
+Technical Support: http://www.cisco.com/techsupport
+Copyright (c) 1986-2022 by Cisco Systems, Inc.
+Compiled Wed 30-Mar-22 01:04 by mcpre
+
+ROM: Bootstrap program is C2960X boot loader
+BOOTLDR: C2960X Boot Loader (C2960X-HBOOT-M) Version 15.2(3r)E1, RELEASE SOFTWARE (fc1)
+
+sw-agence-01 uptime is 41 weeks, 3 days, 2 hours, 11 minutes
+System returned to ROM by power-on
+System restarted at 09:14:02 CET Sat Oct 25 2025
+System image file is "flash:/c2960x-universalk9-mz.152-7.E7/c2960x-universalk9-mz.152-7.E7.bin"
+Last reload reason: power-on
+
+cisco WS-C2960X-24PS-L (APM86XXX) processor (revision N0) with 524288K bytes of memory.
+Processor board ID FOC2145X0ZJ

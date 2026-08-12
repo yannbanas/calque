@@ -1,0 +1,51 @@
+[package]
+name = "calque-collect"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+description = "Collecte en ligne (SSH, LLDP) et confrontation au réel — crate IMPUR, optionnel (§8)"
+
+# Ce crate est officiellement IMPUR (§8 de CALQUE-ARCHITECTURE.md) : il est
+# ABSENT de la liste des crates purs de scripts/check-purity. Il reste
+# optionnel côté CLI (feature `collect` de calque-cli, désactivée par
+# défaut) : analyser des fichiers hors ligne ne compile pas la pile SSH.
+#
+# Séparation interne (§1 s'applique même ici) :
+#   - modules PURS, toujours compilés : `profile` (commandes en LECTURE
+#     SEULE stricte, liste blanche), `ifname` (normalisation des noms de
+#     ports), `clean` (bannières/pagination), `parse` (sorties de
+#     commandes → voisins LLDP/CDP), `detect`, et la logique de
+#     confrontation de `reality::cross` ;
+#   - transport IMPUR, mince : `ssh` (russh + tokio) derrière la feature
+#     `ssh`, et la sonde TCP `reality::probe_tcp` (std::net).
+
+[features]
+default = ["ssh"]
+# La pile SSH. Activée par défaut DU CRATE, mais le crate entier est
+# optionnel côté calque-cli : personne ne la compile sans `--features
+# collect`.
+ssh = ["dep:russh", "dep:tokio"]
+
+[dependencies]
+calque-model = { workspace = true }
+thiserror = { workspace = true }
+
+# Pile SSH retenue : russh (pur Rust, client asynchrone mature, recommandé
+# par §9 du md). tokio est réduit au strict minimum : une runtime
+# mono-thread interne au module `ssh` — l'API publique du crate reste
+# synchrone.
+# Backend cryptographique `ring` plutôt que `aws-lc-rs` (le défaut) :
+# `ring` se compile sans cmake ni NASM sous Windows, où ce projet est
+# développé. Même niveau de maturité, choix purement build.
+russh = { version = "0.62", optional = true, default-features = false, features = [
+    "ring",
+    "rsa",
+    "flate2",
+] }
+tokio = { version = "1", default-features = false, features = [
+    "rt",
+    "net",
+    "time",
+    "io-util",
+], optional = true }

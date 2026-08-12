@@ -11,7 +11,6 @@ use calque_report::{
     DeadRuleKindView, DeadRuleView, DeadRulesView, DecisionView, HopView, MaskerView,
     ReachDecisionView, ReachFlowView, ReachView, StageView, TraceView, VerdictView,
 };
-use calque_vendors::fortigate::FortigateAdapter;
 use calque_vendors::{all_adapters, Confidence};
 use miette::{miette, IntoDiagnostic, WrapErr};
 
@@ -118,20 +117,18 @@ pub fn import_config(path: &Path, name: Option<&str>) -> miette::Result<ImportOu
     // chemin tel que donné, pour que `model check` puisse relire la source.
     let label = path.display().to_string();
 
-    let scores: Vec<(Vendor, Confidence)> = all_adapters()
+    // Sélection par ADAPTATEUR, jamais par `Vendor` : deux adaptateurs
+    // peuvent servir le même constructeur sous deux formats (FortiGate CLI
+    // et FortiGate export YAML) — c'est le score de `detect` qui départage.
+    let adapters = all_adapters();
+    let scores: Vec<Confidence> = adapters.iter().map(|a| a.detect(&raw)).collect();
+    let score_list = adapters
         .iter()
-        .map(|a| (a.vendor(), a.detect(&raw)))
-        .collect();
-    let score_list = scores
-        .iter()
-        .map(|(v, c)| format!("{} : {}/100", vendor_label(*v), c.score()))
+        .zip(&scores)
+        .map(|(a, c)| format!("{} : {}/100", a.label(), c.score()))
         .collect::<Vec<_>>()
         .join(", ");
-    let best = scores
-        .iter()
-        .map(|(_, c)| *c)
-        .max()
-        .unwrap_or(Confidence::NONE);
+    let best = scores.iter().copied().max().unwrap_or(Confidence::NONE);
     if !best.is_confident() {
         return Err(miette!(
             help = "aucun adaptateur ne reconnaît ce format avec assez de confiance (seuil : 60/100) ; vérifiez que le fichier est bien une configuration exportée d'un constructeur géré",
@@ -139,30 +136,23 @@ pub fn import_config(path: &Path, name: Option<&str>) -> miette::Result<ImportOu
             path.display()
         ));
     }
-    let winners: Vec<Vendor> = scores
+    let winners: Vec<usize> = scores
         .iter()
-        .filter(|(_, c)| *c == best)
-        .map(|(v, _)| *v)
+        .enumerate()
+        .filter(|(_, c)| **c == best)
+        .map(|(i, _)| i)
         .collect();
     if winners.len() > 1 {
         return Err(miette!(
-            help = "plusieurs constructeurs obtiennent le même score : impossible de choisir sans deviner (§6.3)",
+            help = "plusieurs adaptateurs obtiennent le même score : impossible de choisir sans deviner (§6.3)",
             "détection ambiguë pour « {} » (scores de détection : {score_list})",
             path.display()
         ));
     }
-    let vendor = winners[0];
+    let adapter = &adapters[winners[0]];
+    let vendor = adapter.vendor();
 
-    let output = match vendor {
-        Vendor::Fortigate => FortigateAdapter.import_str(&raw, &label),
-        v => {
-            return Err(miette!(
-                "constructeur {} détecté pour « {} », mais son adaptateur n'est pas encore branché",
-                vendor_label(v),
-                path.display()
-            ))
-        }
-    };
+    let output = adapter.import_str(&raw, &label);
     let mut output = output.map_err(|diags| {
         let details = diags
             .iter()
@@ -328,22 +318,24 @@ pub fn dead_rules_to_views(device: &DeviceId, dead: &[DeadRule]) -> Vec<DeadRule
 }
 
 /// Construit la vue complète des règles mortes du modèle (chaque
-/// équipement est analysé indépendamment). Une règle irrésoluble rend une
-/// erreur : jamais un rapport deviné (§6.3).
+/// équipement est analysé indépendamment). Une règle irrésoluble (objet
+/// fqdn/geography, cycle…) est EXCLUE avec mention explicite, jamais
+/// devinée (§6.3) — l'analyse continue sur le reste.
 pub fn dead_rules_view(network: &Network) -> miette::Result<DeadRulesView> {
     let mut rules = Vec::new();
+    let mut excluded = Vec::new();
     for device in network.devices.values() {
-        let dead = calque_engine::dead_rules(device).map_err(|e| {
-            miette!(
-                "analyse des règles mortes impossible sur l'équipement « {} » : {e}",
-                device.id
-            )
-        })?;
-        rules.extend(dead_rules_to_views(&device.id, &dead));
+        let report = calque_engine::dead_rules_report(device);
+        rules.extend(dead_rules_to_views(&device.id, &report.dead));
+        excluded.extend(report.diagnostics.into_iter().map(|d| match d.span {
+            Some(span) => format!("équipement « {} » : {} ({span})", device.id, d.message),
+            None => format!("équipement « {} » : {}", device.id, d.message),
+        }));
     }
     Ok(DeadRulesView {
         devices: network.devices.len(),
         rules,
+        excluded,
     })
 }
 

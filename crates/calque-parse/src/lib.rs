@@ -11,8 +11,11 @@
 pub mod cisco_ios;
 pub mod error;
 pub mod fortigate;
+pub mod fortigate_yaml;
+pub mod nftables;
 mod tokenize;
 pub mod tree;
+pub mod xml;
 
 pub use calque_model::SourceSpan;
 pub use error::ParseError;
