@@ -24,6 +24,7 @@ pub mod error;
 pub mod policy;
 pub mod resolve;
 pub mod route;
+pub mod topology;
 pub mod trace;
 
 pub use engine::{trace_packet, trace_packet_from};
@@ -31,4 +32,5 @@ pub use error::EvalError;
 pub use policy::{evaluate_policy, FilterPoint, FilterResult, NatGrant, PolicyEvaluation};
 pub use resolve::packet_matches_rule;
 pub use route::{lookup_route, RouteDecision};
+pub use topology::{check_topology, infer_links_from_subnets, TopologyIssue, TopologyIssueKind};
 pub use trace::{Decision, Hop, Outcome, Stage, Trace, Verdict};

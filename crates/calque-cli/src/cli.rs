@@ -28,7 +28,8 @@ pub enum Command {
     Path(PathArgs),
     /// Exécuter la suite de flux (flows.yaml) ; code de sortie non nul si un flux échoue
     Test(TestArgs),
-    /// Prévisualiser l'effet d'une configuration candidate (arrive en S4)
+    /// Prévisualiser l'effet d'une configuration candidate : flux rompus,
+    /// corrigés, et ouvertures que personne n'a demandées
     Plan(PlanArgs),
     /// Vérifier la topologie
     Topology {
@@ -58,17 +59,35 @@ pub struct ImportArgs {
 
 #[derive(Debug, Subcommand)]
 pub enum ModelCommand {
-    /// Afficher la fidélité du modèle : complet, ou liste des directives non comprises
+    /// Afficher la fidélité du modèle : complet, ou liste des directives non
+    /// comprises. Code de sortie non nul si le modèle est partiel avec des
+    /// diagnostics d'erreur.
     Check,
 }
 
 #[derive(Debug, Subcommand)]
 pub enum TopologyCommand {
-    /// Signaler les liens ambigus ou manquants
-    Check,
+    /// Signaler les liens ambigus ou manquants (inférence par sous-réseau
+    /// + liens déclarés dans topology.yaml, §7)
+    Check {
+        /// Fichier de liens déclarés (facultatif ; ignoré s'il n'existe pas).
+        /// Format : `links: [{a: {device, iface}, b: {device, iface}}]`
+        #[arg(long, value_name = "FICHIER", default_value = "topology.yaml")]
+        topology: PathBuf,
+    },
 }
 
 #[derive(Debug, clap::Args)]
+#[command(after_help = "\
+Le paquet tracé porte le port source éphémère 40000 (représentatif ; le mode \
+symbolique couvrira tout l'intervalle).
+
+Codes de sortie :
+  0  autorisé (verdict ferme)
+  1  refusé, pas de route ou boucle de routage — ou erreur d'exécution
+  2  erreur d'utilisation de la ligne de commande
+  3  verdict non ferme : trace indéterminée, ou modèle partiel touchant un \
+équipement traversé (§6.3 — Calque ne devine jamais)")]
 pub struct PathArgs {
     /// Adresse IP source
     #[arg(value_name = "SOURCE")]
@@ -88,6 +107,15 @@ pub struct PathArgs {
 }
 
 #[derive(Debug, clap::Args)]
+#[command(after_help = "\
+Résolution des extrémités d'un flux (mode concret) :
+  - une adresse IP est prise telle quelle ;
+  - un préfixe CIDR est représenté par sa première adresse hôte ;
+  - un nom symbolique est résolu comme ZONE du modèle (première adresse \
+d'hôte d'un sous-réseau d'une interface membre, hors adresse de \
+l'interface) ; sinon le flux est compté en échec « extrémité non résolue ».
+
+Code de sortie non nul si au moins un flux ne se comporte pas comme déclaré.")]
 pub struct TestArgs {
     /// Le fichier de flux à exécuter
     #[arg(long, value_name = "FICHIER", default_value = "flows.yaml")]
@@ -107,10 +135,24 @@ pub enum OutputFormat {
 }
 
 #[derive(Debug, clap::Args)]
+#[command(after_help = "\
+La candidate remplace l'équipement du modèle qui porte le même identifiant \
+(hostname) — ou l'unique équipement du modèle s'il n'y en a qu'un. Les flux \
+de flows.yaml sont rejoués sur les deux modèles ; les ouvertures non \
+déclarées sont cherchées par sondes (échantillonnage : une absence de ligne \
+NOUVEAU ne prouve rien avant le mode symbolique).
+
+Code de sortie non nul si un flux est ROMPU ou si une ouverture NOUVEAU est \
+détectée.")]
 pub struct PlanArgs {
     /// La configuration candidate à comparer au modèle courant
     #[arg(long, value_name = "FICHIER")]
     pub candidate: PathBuf,
+
+    /// Le fichier de flux à rejouer des deux côtés (facultatif : sans lui,
+    /// seules les ouvertures nouvelles sont recherchées)
+    #[arg(long, value_name = "FICHIER", default_value = "flows.yaml")]
+    pub flows: PathBuf,
 }
 
 /// Destination d'un `calque path` : une adresse et un port/protocole.

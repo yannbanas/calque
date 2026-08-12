@@ -1,2 +1,4 @@
 /target
 **/*.rs.bk
+# Le projet local de `calque import` (modèle sérialisé, non contractuel).
+.calque/

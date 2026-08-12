@@ -101,10 +101,10 @@ fn plan_exige_candidate() {
 #[test]
 fn topology_check() {
     let cli = Cli::try_parse_from(["calque", "topology", "check"]).unwrap();
-    assert!(matches!(
-        cli.command,
+    match cli.command {
         Command::Topology {
-            command: TopologyCommand::Check
-        }
-    ));
+            command: TopologyCommand::Check { topology },
+        } => assert_eq!(topology.to_str(), Some("topology.yaml")),
+        other => panic!("commande inattendue : {other:?}"),
+    }
 }

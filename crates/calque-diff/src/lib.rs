@@ -13,14 +13,15 @@
 //!    deux [`Network`]. Tous les types de `calque-model` sont `Eq`, la
 //!    comparaison est donc exacte et déterministe.
 //!
-//! 2. **Comparaison de comportement** (S4, à venir) — rejouer chaque flux
-//!    déclaré (`flows.yaml`) sur le modèle courant et sur le modèle
-//!    candidat via `calque-engine`, puis classer les écarts dans un
-//!    [`PlanReport`] : flux rompus, corrigés, ouvertures nouvelles non
-//!    déclarées, flux inchangés. Les types de [`PlanReport`] sont définis
-//!    ici pour figer l'API ; le calcul lui-même arrivera avec le moteur.
-//!    En attendant, [`FlowStatus`] est volontairement minimal — il sera
-//!    aligné sur le `Verdict` de `calque-engine` quand celui-ci existera.
+//! 2. **Comparaison de comportement** (S4) — implémentée dans [`plan`] :
+//!    [`plan::plan`] rejoue chaque flux déclaré (`flows.yaml`) sur le
+//!    modèle courant et sur le modèle candidat via `calque-engine`, puis
+//!    classe les écarts dans un [`PlanReport`] : flux rompus, corrigés,
+//!    changés, indécis, ouvertures nouvelles non déclarées (détection par
+//!    SONDES, heuristique bornée et documentée — voir le rustdoc de
+//!    [`plan`]), flux inchangés. Chaque écart porte sa justification
+//!    avant/après : verdict + règle décisive (identifiant et
+//!    fichier/ligne), car la trace est le produit (§5.2).
 
 use std::collections::BTreeMap;
 
@@ -29,6 +30,12 @@ use calque_model::{
     Policy, PolicyId, Route, Rule, RuleId, ServiceObject, Vendor, VrfId, ZoneId,
 };
 use serde::{Deserialize, Serialize};
+
+pub mod plan;
+
+pub use plan::{
+    plan, FlowDelta, FlowStatus, Justification, NewOpening, PlanReport, ResolvedFlow, UndecidedFlow,
+};
 
 // ---------------------------------------------------------------------------
 // Le changement élémentaire
@@ -313,82 +320,6 @@ pub fn diff_policies(before: &Policy, after: &Policy) -> PolicyDelta {
             .then(|| (before.default_action.clone(), after.default_action.clone())),
         rules: diff_map(&before_rules, &after_rules),
         rules_reordered: common_before != common_after,
-    }
-}
-
-// ---------------------------------------------------------------------------
-// PlanReport — l'API de `calque plan` (§10.2), calcul en S4
-// ---------------------------------------------------------------------------
-
-/// Statut d'un flux tel que rapporté par `calque plan`.
-///
-/// PROVISOIRE : sera aligné sur le `Verdict` de `calque-engine`
-/// (`Allowed | Denied | NoRoute | Loop | Unknown`) quand le moteur
-/// existera. `Unknown` couvre notamment les modèles à fidélité
-/// partielle sur le chemin analysé (§6.3 : ne jamais deviner).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum FlowStatus {
-    Allowed,
-    Denied,
-    NoRoute,
-    Loop,
-    Unknown,
-}
-
-/// Un flux déclaré dont le comportement change entre les deux modèles.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct FlowDelta {
-    /// Nom du flux dans `flows.yaml`.
-    pub flow: String,
-    pub before: FlowStatus,
-    pub after: FlowStatus,
-    /// Explication textuelle (« refusé par la politique 8, insérée avant
-    /// la 12 »). En S4, portera aussi la règle et le `SourceSpan` exacts.
-    pub explanation: Option<String>,
-}
-
-/// Une ouverture d'accès qui n'était couverte par AUCUN flux déclaré —
-/// la ligne « NOUVEAU » de §10.2. C'est le signal le plus précieux du
-/// rapport : un accès que personne n'avait demandé.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct NewOpening {
-    /// Source (préfixe, zone ou groupe, tel qu'affichable).
-    pub from: String,
-    /// Destination.
-    pub to: String,
-    /// Service (« 445/tcp », « any », ...).
-    pub port: String,
-}
-
-/// Le rapport de `calque plan` : ce qui change de comportement entre le
-/// modèle courant et le modèle candidat.
-///
-/// Les types sont figés dès maintenant pour que `calque-report` et
-/// `calque-cli` puissent s'y adosser ; le CALCUL (rejouer chaque flux
-/// sur les deux modèles via `calque-engine`) arrive en S4. Ce crate
-/// n'expose donc pas encore de `plan(...)` — il serait mensonger.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct PlanReport {
-    /// Flux déclarés qui passaient et ne passent plus (ROMPU).
-    pub broken: Vec<FlowDelta>,
-    /// Flux déclarés qui dévièrent et sont maintenant conformes (CORRIGÉ).
-    pub fixed: Vec<FlowDelta>,
-    /// Ouvertures nouvelles non couvertes par un flux déclaré (NOUVEAU).
-    pub new_flows: Vec<NewOpening>,
-    /// Noms des flux déclarés dont le comportement ne change pas.
-    pub unchanged: Vec<String>,
-}
-
-impl PlanReport {
-    /// Vrai si aucun flux ne change de comportement et qu'aucune
-    /// ouverture nouvelle n'apparaît.
-    pub fn is_quiet(&self) -> bool {
-        self.broken.is_empty() && self.fixed.is_empty() && self.new_flows.is_empty()
-    }
-
-    /// Nombre de flux déclarés dont le comportement change.
-    pub fn changed_count(&self) -> usize {
-        self.broken.len() + self.fixed.len()
     }
 }
 

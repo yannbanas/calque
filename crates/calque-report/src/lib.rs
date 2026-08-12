@@ -277,6 +277,88 @@ pub fn render_flow_results_json(results: &[FlowResult]) -> String {
         .unwrap_or_else(|e| format!("{{\"erreur\":\"échec de sérialisation : {e}\"}}"))
 }
 
+// ---------------------------------------------------------------------------
+// Vue d'un rapport de `calque plan` (§10.2)
+// ---------------------------------------------------------------------------
+
+/// Une ligne du rapport de `calque plan` : un flux dont le comportement
+/// change, un flux non ferme, ou une ouverture non déclarée.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PlanEntry {
+    /// Nom du flux (ou libellé de l'ouverture détectée).
+    pub name: String,
+    /// Libellé du paquet ou du flux : `10.0.10.5 → 10.0.20.5:445/tcp`.
+    pub flow: String,
+    /// Justification, éventuellement multi-ligne (avant/après, règles
+    /// décisives avec fichier + ligne).
+    pub detail: Option<String>,
+}
+
+/// La vue du rapport de `calque plan`, prête à rendre (§10.2). Comme pour
+/// les traces, `calque-cli` adapte les types réels de `calque-diff` vers
+/// cette vue.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PlanView {
+    /// ROMPU — le flux déclaré dévie désormais de son attente.
+    pub broken: Vec<PlanEntry>,
+    /// CORRIGÉ — le flux déclaré redevient conforme.
+    pub fixed: Vec<PlanEntry>,
+    /// CHANGÉ — le verdict change sans jugement (flux sans attente, ou
+    /// changement qui n'inverse pas passe/bloqué).
+    pub changed: Vec<PlanEntry>,
+    /// NON FERME — le modèle ne permet pas de conclure (§6.3).
+    pub undecided: Vec<PlanEntry>,
+    /// NOUVEAU — ouverture qu'aucun flux déclaré ne couvrait.
+    pub new_flows: Vec<PlanEntry>,
+    /// Noms des flux déclarés dont le comportement ne change pas.
+    pub unchanged: Vec<String>,
+}
+
+impl PlanView {
+    /// Nombre de flux déclarés dont le comportement change.
+    pub fn changed_count(&self) -> usize {
+        self.broken.len() + self.fixed.len() + self.changed.len()
+    }
+}
+
+fn render_plan_entry(out: &mut String, prefix: &str, e: &PlanEntry) {
+    let _ = writeln!(out, "  {prefix:<9}{}", e.name);
+    let _ = writeln!(out, "           {}", e.flow);
+    if let Some(detail) = &e.detail {
+        for line in detail.lines() {
+            let _ = writeln!(out, "           {line}");
+        }
+    }
+    let _ = writeln!(out);
+}
+
+/// Rendu texte d'un rapport de `calque plan`, dans l'esprit de la
+/// maquette §10.2 (ROMPU / CORRIGÉ / CHANGÉ / NON FERME / NOUVEAU,
+/// puis le décompte des flux inchangés).
+pub fn render_plan_text(view: &PlanView) -> String {
+    let mut out = String::new();
+    let changed = view.changed_count();
+    if changed > 0 {
+        let _ = writeln!(out, "{changed} flux change(nt) de comportement :\n");
+    }
+    for (prefix, entries) in [
+        ("ROMPU", &view.broken),
+        ("CORRIGÉ", &view.fixed),
+        ("CHANGÉ", &view.changed),
+        ("NON FERME", &view.undecided),
+        ("NOUVEAU", &view.new_flows),
+    ] {
+        for e in entries {
+            render_plan_entry(&mut out, prefix, e);
+        }
+    }
+    if changed == 0 && view.new_flows.is_empty() && view.undecided.is_empty() {
+        let _ = writeln!(out, "Aucun changement de comportement détecté.");
+    }
+    let _ = writeln!(out, "{} flux inchangé(s).", view.unchanged.len());
+    out
+}
+
 /// Rendu JUnit XML minimal (testsuite / testcase / failure), écrit à la
 /// main. Suffisant pour GitLab CI, Jenkins et consorts.
 pub fn render_flow_results_junit(suite_name: &str, results: &[FlowResult]) -> String {
@@ -422,6 +504,49 @@ mod tests {
         assert!(txt.contains("1. fw-01  entrée port1"));
         assert!(txt.contains("filtre d'entrée : refusé (règle 34, fw-01.conf ligne 812)"));
         assert!(txt.contains("masquée par les règles antérieures : 12"));
+    }
+
+    #[test]
+    fn rendu_texte_dun_plan() {
+        let view = PlanView {
+            broken: vec![PlanEntry {
+                name: "la comptabilité accède au serveur de fichiers".into(),
+                flow: "10.0.10.5 → 10.0.20.5:445/tcp".into(),
+                detail: Some(
+                    "avant : autorisé par la règle 12 (fw-01.conf ligne 120)\n\
+                     après : refusé par la règle 8 (fw-01-nouveau.conf ligne 80)"
+                        .into(),
+                ),
+            }],
+            fixed: vec![],
+            changed: vec![],
+            undecided: vec![],
+            new_flows: vec![PlanEntry {
+                name: "10.0.30.0/24 → 10.0.20.0/24:80/tcp devient joignable".into(),
+                flow: "10.0.30.1 → 10.0.20.1:80/tcp".into(),
+                detail: Some("n'était couvert par aucun flux déclaré".into()),
+            }],
+            unchanged: vec!["le wifi invité est isolé de l'administration".into()],
+        };
+        let txt = render_plan_text(&view);
+        assert!(txt.contains("1 flux change(nt) de comportement :"), "{txt}");
+        assert!(txt.contains("ROMPU"), "{txt}");
+        assert!(txt.contains("avant : autorisé par la règle 12"), "{txt}");
+        assert!(txt.contains("après : refusé par la règle 8"), "{txt}");
+        assert!(txt.contains("NOUVEAU"), "{txt}");
+        assert!(txt.contains("devient joignable"), "{txt}");
+        assert!(txt.contains("1 flux inchangé(s)."), "{txt}");
+    }
+
+    #[test]
+    fn rendu_dun_plan_calme() {
+        let view = PlanView::default();
+        let txt = render_plan_text(&view);
+        assert!(
+            txt.contains("Aucun changement de comportement détecté."),
+            "{txt}"
+        );
+        assert!(txt.contains("0 flux inchangé(s)."), "{txt}");
     }
 
     #[test]

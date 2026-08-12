@@ -171,15 +171,19 @@ Un modèle faux est pire qu'aucun modèle. Quatre niveaux de défense :
 ## État et feuille de route
 
 **v0, en développement actif.** La spécification est stable
-([CALQUE-ARCHITECTURE.md](CALQUE-ARCHITECTURE.md)) ; rien n'est encore
-utilisable en production.
+([CALQUE-ARCHITECTURE.md](CALQUE-ARCHITECTURE.md)). Le MVP fonctionne de bout
+en bout sur FortiGate (`import` → `model check` → `path --explain` → `test` →
+`plan` → `topology check`), couvert par des tests de bout en bout sur le
+corpus. Pas encore éprouvé sur des configurations de production — les retours
+de terrain sont bienvenus.
 
 | Étape | Contenu | État |
 |---|---|---|
-| S1 | Analyse FortiGate, représentation intermédiaire, `import`, `model check` | 🚧 en cours |
-| S2 | Algèbre de pavés, moteur concret, `path --explain` | 🚧 cœur implémenté et testé, branchement CLI en cours |
-| S3 | `flows.yaml`, `calque test`, sortie JUnit | 🚧 format et rendus prêts |
-| S4 | `calque plan` — la prévisualisation de changement | ⏳ |
+| S1 | Analyse FortiGate, représentation intermédiaire, `import`, `model check` | ✅ |
+| S2 | Algèbre de pavés, moteur concret, `path --explain` | ✅ |
+| S3 | `flows.yaml`, `calque test`, sortie JUnit | ✅ |
+| S4 | `calque plan` — la prévisualisation de changement (ouvertures non demandées détectées par sondes, exhaustivité au S6) | ✅ |
+| — | Topologie v1 : inférence par sous-réseau, `topology.yaml`, `topology check` | ✅ |
 | S5 | Deuxième constructeur : Cisco IOS | ⏳ (tokenizer prêt) |
 | S6 | Mode symbolique : `calque reach`, règles mortes et masquées | ⏳ |
 | S7 | Collecte SSH, voisinage LLDP, découverte de topologie | ⏳ |
