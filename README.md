@@ -89,6 +89,15 @@ cargo build --workspace --release
 # le binaire : target/release/calque
 ```
 
+Ou via l'image Docker publiée sur GHCR à chaque commit sur `main`
+(statique, sans shell — l'outil lit et écrit uniquement dans le
+répertoire monté sur `/work`) :
+
+```bash
+docker run --rm -v "$PWD:/work" ghcr.io/yannbanas/calque import fw-01.conf
+docker run --rm -v "$PWD:/work" ghcr.io/yannbanas/calque test --flows flows.yaml
+```
+
 ### La suite de tests du réseau
 
 `flows.yaml` déclare ce que le réseau doit faire — c'est un contrat versionnable :

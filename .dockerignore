@@ -1,0 +1,6 @@
+target/
+.git/
+.calque/
+fuzz/target/
+*.md
+!README.md

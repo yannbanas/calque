@@ -9,8 +9,11 @@ members = [
     "crates/calque-parse",
     "crates/calque-vendors",
     "crates/calque-report",
+    "crates/calque-scrub",
     "crates/calque-cli",
 ]
+# Les cibles cargo-fuzz ont leur propre espace de travail.
+exclude = ["fuzz"]
 
 [workspace.package]
 version = "0.1.0"
@@ -26,6 +29,7 @@ calque-diff = { path = "crates/calque-diff" }
 calque-parse = { path = "crates/calque-parse" }
 calque-vendors = { path = "crates/calque-vendors" }
 calque-report = { path = "crates/calque-report" }
+calque-scrub = { path = "crates/calque-scrub" }
 
 ipnet = { version = "2", features = ["serde"] }
 serde = { version = "1", features = ["derive"] }

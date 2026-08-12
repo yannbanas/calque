@@ -1,0 +1,13 @@
+[package]
+name = "calque-scrub"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+description = "Anonymisation cohérente des configurations réseau (§11.4)"
+
+[dependencies]
+ipnet = { workspace = true }
+
+[dev-dependencies]
+calque-parse = { workspace = true }

@@ -222,6 +222,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "calque-scrub"
+version = "0.1.0"
+dependencies = [
+ "calque-parse",
+ "ipnet",
+]
+
+[[package]]
 name = "calque-space"
 version = "0.1.0"
 dependencies = [
