@@ -1,0 +1,77 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 470" role="img"
+     aria-label="calque plan compare avant et après : un flux ROMPU, un flux CORRIGÉ, et une ouverture NOUVELLE que personne n'a demandée.">
+  <title>calque plan — les flux qui changent de comportement, avant d'appliquer</title>
+
+  <style>
+    .pa-mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+    .pa-ui   { font-family: system-ui, sans-serif; }
+    .pa-row  { animation: pa-in 0.7s ease-out both; }
+    .pa-r1 { animation-delay: 0.05s; }
+    .pa-r2 { animation-delay: 0.3s; }
+    .pa-r3 { animation-delay: 0.55s; }
+    .pa-halo { animation: pa-glow 4s ease-in-out 1.4s infinite; }
+    @keyframes pa-in { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: translateY(0); } }
+    @keyframes pa-glow { 0%, 100% { opacity: 0; } 50% { opacity: 0.45; } }
+    @media (prefers-reduced-motion: reduce) {
+      .pa-row { animation: none; opacity: 1; transform: none; }
+      .pa-halo { animation: none; opacity: 0.25; }
+    }
+  </style>
+
+  <rect x="0" y="0" width="960" height="470" rx="12" fill="#0d1117"/>
+
+  <text x="40" y="45" class="pa-mono" font-size="13" fill="#8b949e">$ calque plan --candidate fw-01-nouveau.conf</text>
+
+  <text x="595" y="88" text-anchor="middle" class="pa-ui" font-size="12.5" fill="#8b949e">avant · fw-01.conf</text>
+  <text x="822" y="88" text-anchor="middle" class="pa-ui" font-size="12.5" fill="#8b949e">après · fw-01-nouveau.conf</text>
+
+  <!-- ============ ROMPU ============ -->
+  <g class="pa-row pa-r1">
+    <rect x="40" y="105" width="890" height="95" rx="10" fill="#161b22" stroke="#30363d"/>
+    <rect x="58" y="121" width="88" height="26" rx="13" fill="rgba(248,81,73,0.15)" stroke="#f85149"/>
+    <text x="102" y="138" text-anchor="middle" class="pa-ui" font-size="12.5" font-weight="700" fill="#f85149">ROMPU</text>
+    <text x="160" y="138" class="pa-ui" font-size="13.5" fill="#e6edf3">la comptabilité accède au serveur de fichiers</text>
+    <text x="160" y="161" class="pa-mono" font-size="12.5" fill="#8b949e">10.0.10.0/24 → 10.0.20.5 · 445/tcp</text>
+    <rect x="500" y="131" width="190" height="30" rx="15" fill="rgba(63,185,80,0.12)" stroke="#3fb950"/>
+    <text x="595" y="150" text-anchor="middle" class="pa-ui" font-size="12.5" fill="#3fb950">autorisé · règle 12</text>
+    <text x="595" y="182" text-anchor="middle" class="pa-ui" font-size="12" fill="#6e7681">(fw-01.conf ligne 120)</text>
+    <text x="707" y="151" text-anchor="middle" class="pa-ui" font-size="16" fill="#8b949e">→</text>
+    <rect x="727" y="131" width="196" height="30" rx="15" fill="rgba(248,81,73,0.12)" stroke="#f85149"/>
+    <text x="825" y="150" text-anchor="middle" class="pa-ui" font-size="12.5" fill="#f85149">refusé · règle 8</text>
+    <text x="825" y="182" text-anchor="middle" class="pa-ui" font-size="12" fill="#6e7681">(fw-01-nouveau.conf ligne 80)</text>
+  </g>
+
+  <!-- ============ CORRIGÉ ============ -->
+  <g class="pa-row pa-r2">
+    <rect x="40" y="215" width="890" height="95" rx="10" fill="#161b22" stroke="#30363d"/>
+    <rect x="58" y="231" width="88" height="26" rx="13" fill="rgba(63,185,80,0.15)" stroke="#3fb950"/>
+    <text x="102" y="248" text-anchor="middle" class="pa-ui" font-size="12.5" font-weight="700" fill="#3fb950">CORRIGÉ</text>
+    <text x="160" y="248" class="pa-ui" font-size="13.5" fill="#e6edf3">le wifi invité est isolé de l'administration</text>
+    <text x="160" y="271" class="pa-mono" font-size="12.5" fill="#8b949e">vlan-invite → vlan-admin · tous les ports</text>
+    <rect x="500" y="241" width="190" height="30" rx="15" fill="rgba(248,81,73,0.12)" stroke="#f85149"/>
+    <text x="595" y="260" text-anchor="middle" class="pa-ui" font-size="12.5" fill="#f85149">autorisé — à tort</text>
+    <text x="595" y="292" text-anchor="middle" class="pa-ui" font-size="12" fill="#6e7681">attendu : deny</text>
+    <text x="707" y="261" text-anchor="middle" class="pa-ui" font-size="16" fill="#8b949e">→</text>
+    <rect x="727" y="241" width="196" height="30" rx="15" fill="rgba(63,185,80,0.12)" stroke="#3fb950"/>
+    <text x="825" y="260" text-anchor="middle" class="pa-ui" font-size="12.5" fill="#3fb950">refusé · conforme</text>
+  </g>
+
+  <!-- ============ NOUVEAU ============ -->
+  <g class="pa-row pa-r3">
+    <rect x="40" y="325" width="890" height="95" rx="10" fill="#161b22" stroke="#30363d"/>
+    <rect x="58" y="341" width="88" height="26" rx="13" fill="rgba(240,136,62,0.15)" stroke="#f0883e"/>
+    <text x="102" y="358" text-anchor="middle" class="pa-ui" font-size="12.5" font-weight="700" fill="#f0883e">NOUVEAU</text>
+    <text x="160" y="358" class="pa-ui" font-size="13.5" fill="#e6edf3">10.0.30.0/24 → 10.0.20.0/24 devient joignable</text>
+    <text x="160" y="381" class="pa-mono" font-size="12.5" fill="#8b949e">exemple : 10.0.30.1 → 10.0.20.1 · 80/tcp</text>
+    <text x="160" y="404" class="pa-ui" font-size="12" font-style="italic" fill="#f0883e">« une ouverture que personne n'a demandée » — signalée en échec</text>
+    <rect x="500" y="351" width="190" height="30" rx="15" fill="#0d1117" stroke="#30363d"/>
+    <text x="595" y="370" text-anchor="middle" class="pa-ui" font-size="12.5" fill="#8b949e">injoignable</text>
+    <text x="707" y="371" text-anchor="middle" class="pa-ui" font-size="16" fill="#8b949e">→</text>
+    <rect x="722" y="346" width="206" height="40" rx="20" fill="none" stroke="#f0883e" stroke-width="4" opacity="0" class="pa-halo"/>
+    <rect x="727" y="351" width="196" height="30" rx="15" fill="rgba(240,136,62,0.12)" stroke="#f0883e"/>
+    <text x="825" y="370" text-anchor="middle" class="pa-ui" font-size="12.5" fill="#f0883e">autorisé · règle 5</text>
+  </g>
+
+  <text x="40" y="452" class="pa-mono" font-size="13" fill="#8b949e">2 flux changent de comportement · 1 ouverture non déclarée · code de sortie ≠ 0</text>
+</svg>

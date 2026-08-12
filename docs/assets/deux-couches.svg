@@ -1,0 +1,116 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1120 400" role="img"
+     aria-label="Pipeline d'analyse : texte de configuration, arbre générique (couche 1, par format), représentation intermédiaire (couche 2, par constructeur), moteur pur.">
+  <title>Deux couches d'analyse, jamais une</title>
+
+  <style>
+    .dc-mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+    .dc-ui   { font-family: system-ui, sans-serif; }
+    .dc-s1 { animation: dc-k1 10s ease-in-out infinite; }
+    .dc-s2 { animation: dc-k2 10s ease-in-out infinite; }
+    .dc-s3 { animation: dc-k3 10s ease-in-out infinite; }
+    .dc-s4 { animation: dc-k4 10s ease-in-out infinite; }
+    @keyframes dc-k1 { 0%,5%  { opacity: 0; } 12%,88% { opacity: 1; } 96%,100% { opacity: 0; } }
+    @keyframes dc-k2 { 0%,15% { opacity: 0; } 22%,88% { opacity: 1; } 96%,100% { opacity: 0; } }
+    @keyframes dc-k3 { 0%,30% { opacity: 0; } 37%,88% { opacity: 1; } 96%,100% { opacity: 0; } }
+    @keyframes dc-k4 { 0%,45% { opacity: 0; } 52%,88% { opacity: 1; } 96%,100% { opacity: 0; } }
+    @media (prefers-reduced-motion: reduce) {
+      .dc-s1, .dc-s2, .dc-s3, .dc-s4 { animation: none; opacity: 1; }
+    }
+  </style>
+
+  <rect x="0" y="0" width="1120" height="400" rx="12" fill="#0d1117"/>
+
+  <!-- ================= étape 1 : le texte ================= -->
+  <text x="142" y="64" text-anchor="middle" class="dc-ui" font-size="12.5" fill="#8b949e">texte de configuration</text>
+  <rect x="30" y="80" width="225" height="250" rx="10" fill="#161b22" stroke="#30363d"/>
+  <g class="dc-mono" font-size="12">
+    <text x="45" y="108" fill="#58a6ff">config firewall policy</text>
+    <text x="45" y="128" fill="#58a6ff">  edit 2</text>
+    <text x="240" y="128" text-anchor="end" fill="#8b949e">L82</text>
+    <text x="45" y="148" fill="#e6edf3">    set srcintf lan</text>
+    <text x="45" y="168" fill="#e6edf3">    set dstintf z-dmz</text>
+    <text x="45" y="188" fill="#e6edf3">    set srcaddr r-postes</text>
+    <text x="45" y="208" fill="#e6edf3">    set dstaddr h-srv-web</text>
+    <text x="45" y="228" fill="#e6edf3">    set service TCP-8443</text>
+    <text x="45" y="248" fill="#e6edf3">    set action accept</text>
+    <text x="45" y="268" fill="#58a6ff">  next</text>
+    <text x="45" y="288" fill="#58a6ff">end</text>
+  </g>
+
+  <!-- flèche couche 1 -->
+  <g class="dc-s1">
+    <text x="300" y="178" text-anchor="middle" class="dc-ui" font-size="13" font-weight="600" fill="#58a6ff">couche 1</text>
+    <line x1="263" y1="200" x2="330" y2="200" stroke="#30363d" stroke-width="2"/>
+    <polygon points="330,195 340,200 330,205" fill="#30363d"/>
+    <text x="300" y="224" text-anchor="middle" class="dc-ui" font-size="12" fill="#8b949e">par format</text>
+  </g>
+
+  <!-- ================= étape 2 : l'arbre générique ================= -->
+  <text x="452" y="64" text-anchor="middle" class="dc-ui" font-size="12.5" fill="#8b949e">arbre de configuration générique</text>
+  <rect x="345" y="80" width="215" height="250" rx="10" fill="#161b22" stroke="#30363d"/>
+  <g class="dc-s1">
+    <rect x="357" y="100" width="190" height="26" rx="5" fill="#0d1117" stroke="#30363d"/>
+    <text x="366" y="117" class="dc-mono" font-size="12" fill="#58a6ff">config firewall policy</text>
+    <path d="M 367 126 L 367 152 L 379 152" fill="none" stroke="#30363d" stroke-width="1.5"/>
+    <rect x="379" y="140" width="110" height="24" rx="5" fill="#0d1117" stroke="#30363d"/>
+    <text x="388" y="156" class="dc-mono" font-size="12" fill="#58a6ff">edit 2</text>
+  </g>
+  <g class="dc-s2">
+    <path d="M 389 164 L 389 189 L 403 189" fill="none" stroke="#30363d" stroke-width="1.5"/>
+    <path d="M 389 164 L 389 217 L 403 217" fill="none" stroke="#30363d" stroke-width="1.5"/>
+    <path d="M 389 164 L 389 245 L 403 245" fill="none" stroke="#30363d" stroke-width="1.5"/>
+    <path d="M 389 164 L 389 273 L 403 273" fill="none" stroke="#30363d" stroke-width="1.5"/>
+    <rect x="403" y="178" width="147" height="22" rx="5" fill="#0d1117" stroke="#30363d"/>
+    <text x="411" y="193" class="dc-mono" font-size="12" fill="#e6edf3">srcaddr r-postes</text>
+    <rect x="403" y="206" width="147" height="22" rx="5" fill="#0d1117" stroke="#30363d"/>
+    <text x="411" y="221" class="dc-mono" font-size="12" fill="#e6edf3">dstaddr h-srv-web</text>
+    <rect x="403" y="234" width="147" height="22" rx="5" fill="#0d1117" stroke="#30363d"/>
+    <text x="411" y="249" class="dc-mono" font-size="12" fill="#e6edf3">service TCP-8443</text>
+    <rect x="403" y="262" width="147" height="22" rx="5" fill="#0d1117" stroke="#30363d"/>
+    <text x="411" y="277" class="dc-mono" font-size="12" fill="#3fb950">action accept</text>
+  </g>
+  <text x="452" y="352" text-anchor="middle" class="dc-mono" font-size="12" fill="#8b949e">calque-parse</text>
+
+  <!-- flèche couche 2 -->
+  <g class="dc-s3">
+    <text x="612" y="178" text-anchor="middle" class="dc-ui" font-size="13" font-weight="600" fill="#58a6ff">couche 2</text>
+    <line x1="568" y1="200" x2="645" y2="200" stroke="#30363d" stroke-width="2"/>
+    <polygon points="645,195 655,200 645,205" fill="#30363d"/>
+    <text x="612" y="224" text-anchor="middle" class="dc-ui" font-size="12" fill="#8b949e">par constructeur</text>
+  </g>
+
+  <!-- ================= étape 3 : la représentation intermédiaire ================= -->
+  <text x="780" y="64" text-anchor="middle" class="dc-ui" font-size="12.5" fill="#8b949e">représentation intermédiaire</text>
+  <rect x="665" y="80" width="230" height="250" rx="10" fill="#161b22" stroke="#30363d"/>
+  <g class="dc-s3" font-size="12">
+    <text x="683" y="112" class="dc-mono" fill="#8b949e">Rule {</text>
+    <text x="683" y="133" class="dc-mono" fill="#8b949e">  matches : <tspan fill="#e6edf3">pavé 5D</tspan></text>
+    <text x="683" y="154" class="dc-mono" fill="#8b949e">    src  <tspan fill="#e6edf3">10.10.1.50–69</tspan></text>
+    <text x="683" y="175" class="dc-mono" fill="#8b949e">    dst  <tspan fill="#e6edf3">10.10.2.10</tspan></text>
+    <text x="683" y="196" class="dc-mono" fill="#8b949e">    port <tspan fill="#e6edf3">8443/tcp</tspan></text>
+    <text x="683" y="217" class="dc-mono" fill="#8b949e">  action : <tspan fill="#3fb950">Accept</tspan></text>
+    <text x="683" y="238" class="dc-mono" fill="#8b949e">  source : <tspan fill="#58a6ff">ligne 82</tspan></text>
+    <text x="683" y="259" class="dc-mono" fill="#8b949e">}</text>
+    <text x="683" y="292" class="dc-ui" font-size="12" fill="#8b949e">objets résolus tard,</text>
+    <text x="683" y="310" class="dc-ui" font-size="12" fill="#8b949e">ordre des règles préservé</text>
+  </g>
+  <text x="780" y="352" text-anchor="middle" class="dc-mono" font-size="12" fill="#8b949e">calque-vendors</text>
+
+  <!-- flèche vers le moteur -->
+  <g class="dc-s4">
+    <line x1="903" y1="200" x2="960" y2="200" stroke="#30363d" stroke-width="2"/>
+    <polygon points="960,195 970,200 960,205" fill="#30363d"/>
+  </g>
+
+  <!-- ================= étape 4 : le moteur ================= -->
+  <g class="dc-s4">
+    <rect x="975" y="80" width="115" height="250" rx="10" fill="#161b22" stroke="#3fb950"/>
+    <text x="1032" y="165" text-anchor="middle" class="dc-ui" font-size="14" font-weight="600" fill="#e6edf3">moteur</text>
+    <rect x="1010" y="180" width="44" height="21" rx="10.5" fill="rgba(63,185,80,0.12)" stroke="#3fb950"/>
+    <text x="1032" y="195" text-anchor="middle" class="dc-ui" font-size="12" font-weight="600" fill="#3fb950">PUR</text>
+    <text x="1032" y="242" text-anchor="middle" class="dc-mono" font-size="12" fill="#8b949e">calque-engine</text>
+    <text x="1032" y="262" text-anchor="middle" class="dc-mono" font-size="12" fill="#8b949e">calque-space</text>
+  </g>
+  <text x="1032" y="352" text-anchor="middle" class="dc-ui" font-size="12" fill="#8b949e">verdicts + traces</text>
+</svg>

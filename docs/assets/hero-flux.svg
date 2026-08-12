@@ -1,0 +1,98 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 340" role="img"
+     aria-label="Deux paquets traversent un pare-feu : l'un est autorisé par la règle 2, l'autre est arrêté par la règle 8.">
+  <title>calque path — le verdict, avec la règle qui le justifie</title>
+
+  <rect x="0" y="0" width="960" height="340" rx="12" fill="#0d1117"/>
+
+  <!-- légende haute -->
+  <text x="50" y="45" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace"
+        font-size="13" fill="#8b949e">calque path — chaque verdict porte la règle, le fichier et la ligne qui le justifient</text>
+
+  <!-- liaisons entre les nœuds -->
+  <g stroke="#30363d" stroke-width="2">
+    <line x1="200" y1="144" x2="388" y2="144"/>
+    <line x1="610" y1="144" x2="758" y2="144"/>
+    <line x1="200" y1="220" x2="388" y2="220"/>
+  </g>
+  <g fill="#30363d">
+    <polygon points="380,139 390,144 380,149"/>
+    <polygon points="750,139 760,144 750,149"/>
+    <polygon points="380,215 390,220 380,225"/>
+  </g>
+
+  <!-- nœud lan -->
+  <rect x="50" y="115" width="150" height="115" rx="10" fill="#161b22" stroke="#30363d"/>
+  <text x="125" y="152" text-anchor="middle" font-family="system-ui, sans-serif"
+        font-size="15" font-weight="600" fill="#e6edf3">lan</text>
+  <text x="125" y="174" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace"
+        font-size="12" fill="#8b949e">10.10.1.0/24</text>
+
+  <!-- nœud fw-01 -->
+  <rect x="390" y="75" width="220" height="205" rx="10" fill="#161b22" stroke="#30363d"/>
+  <text x="500" y="103" text-anchor="middle" font-family="system-ui, sans-serif"
+        font-size="15" font-weight="600" fill="#e6edf3">fw-01</text>
+
+  <!-- règle qui autorise -->
+  <rect x="404" y="124" width="192" height="40" rx="6" fill="rgba(63,185,80,0.12)" stroke="#3fb950"/>
+  <text x="414" y="140" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace"
+        font-size="12" font-weight="600" fill="#3fb950">règle 2 · accept</text>
+  <text x="414" y="156" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace"
+        font-size="12" fill="#8b949e">lan → dmz · 8443/tcp</text>
+
+  <text x="500" y="188" text-anchor="middle" font-family="system-ui, sans-serif"
+        font-size="13" fill="#484f58">···</text>
+
+  <!-- règle qui refuse -->
+  <rect x="404" y="200" width="192" height="40" rx="6" fill="rgba(248,81,73,0.12)" stroke="#f85149"/>
+  <text x="414" y="216" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace"
+        font-size="12" font-weight="600" fill="#f85149">règle 8 · deny</text>
+  <text x="414" y="232" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace"
+        font-size="12" fill="#8b949e">lan → dmz · 445/tcp</text>
+
+  <!-- nœud dmz -->
+  <rect x="760" y="99" width="150" height="90" rx="10" fill="#161b22" stroke="#30363d"/>
+  <text x="835" y="135" text-anchor="middle" font-family="system-ui, sans-serif"
+        font-size="15" font-weight="600" fill="#e6edf3">dmz</text>
+  <text x="835" y="157" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace"
+        font-size="12" fill="#8b949e">10.10.2.0/24</text>
+
+  <!-- verdicts -->
+  <text x="835" y="218" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace"
+        font-size="12.5" fill="#3fb950">autorisé par la règle 2</text>
+  <text x="835" y="236" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace"
+        font-size="12.5" fill="#3fb950">(fw-01.conf ligne 82)</text>
+
+  <text x="500" y="308" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace"
+        font-size="13" fill="#f85149">« refusé par la règle 8, fw-01.conf ligne 92 »</text>
+
+  <!-- paquet autorisé (vert) : traverse lan → fw → dmz -->
+  <g opacity="0">
+    <circle r="10" fill="#3fb950" opacity="0.22"/>
+    <circle r="5.5" fill="#3fb950"/>
+    <animateMotion path="M 205 144 L 900 144" calcMode="linear"
+                   keyPoints="0;1;1" keyTimes="0;0.45;1"
+                   dur="7s" repeatCount="indefinite"/>
+    <animate attributeName="opacity" values="0;1;1;0;0"
+             keyTimes="0;0.03;0.42;0.5;1" dur="7s" repeatCount="indefinite"/>
+  </g>
+
+  <!-- paquet refusé (rouge) : arrêté net sur la règle 8 -->
+  <g opacity="0">
+    <circle r="10" fill="#f85149" opacity="0.22"/>
+    <circle r="5.5" fill="#f85149"/>
+    <animateMotion path="M 205 220 L 402 220" calcMode="linear"
+                   keyPoints="0;1;1" keyTimes="0;0.3;1"
+                   dur="7s" repeatCount="indefinite"/>
+    <animate attributeName="opacity" values="0;1;1;0;0"
+             keyTimes="0;0.03;0.55;0.65;1" dur="7s" repeatCount="indefinite"/>
+  </g>
+
+  <!-- onde d'impact sur la règle rouge -->
+  <circle cx="402" cy="220" r="5" fill="none" stroke="#f85149" stroke-width="2" opacity="0">
+    <animate attributeName="r" values="5;5;18;18" keyTimes="0;0.3;0.44;1"
+             dur="7s" repeatCount="indefinite"/>
+    <animate attributeName="opacity" values="0;0;0.85;0;0" keyTimes="0;0.29;0.31;0.46;1"
+             dur="7s" repeatCount="indefinite"/>
+  </circle>
+</svg>

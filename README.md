@@ -4,6 +4,10 @@
 [![Licence](https://img.shields.io/badge/licence-Apache--2.0-blue.svg)](LICENSE)
 [![Rust](https://img.shields.io/badge/rust-stable-orange.svg)](https://rustup.rs)
 
+<p align="center">
+  <img src="docs/assets/hero-flux.svg" width="100%" alt="Deux paquets traversent le pare-feu entre lan et dmz : le premier passe, autorisé par la règle 2 (fw-01.conf ligne 82) ; le second est arrêté net — refusé par la règle 8, fw-01.conf ligne 92.">
+</p>
+
 **Calque** est un outil en ligne de commande qui lit les configurations d'équipements
 réseau (pare-feux, routeurs), en construit un modèle formel, et répond à deux
 questions :
@@ -47,6 +51,10 @@ Calque traite la configuration réseau comme du code :
   masquée par la règle 12, ligne 340 », la réponse à la question qui fait
   perdre le plus de temps aux administrateurs.
 
+<p align="center">
+  <img src="docs/assets/shadowed.svg" width="100%" alt="Le paquet est arrêté par la règle 12 (deny, large) avant d'atteindre la règle 34 (accept, incluse et grisée) : votre règle d'autorisation est masquée par la règle 12, ligne 340.">
+</p>
+
 ## Ce qui distingue Calque
 
 **Le cœur est pur.** Les crates d'analyse (`calque-model`, `calque-space`,
@@ -75,6 +83,10 @@ soustraction, normalisation) — quelques centaines de lignes, rapides sur les
 tailles réelles, et dont les résultats se lisent. Les diagrammes de décision
 binaires restent une optimisation possible de v2, derrière le trait
 `HeaderSpace` ([ADR 001](docs/adr/001-representation-par-paves.md)).
+
+<p align="center">
+  <img src="docs/assets/paves.svg" width="100%" alt="Une règle de filtrage (source, destination, protocole, port, action) est un pavé dans l'espace src × dst × port ; deux pavés s'intersectent et la soustraction découpe le reste en pavés disjoints — une politique est une liste ordonnée de pavés.">
+</p>
 
 ---
 
@@ -122,6 +134,37 @@ calque test                     # sortie texte, code de sortie ≠ 0 si un flux 
 calque test --format junit      # pour l'intégration continue
 ```
 
+### Prévisualiser un changement
+
+`calque plan` compare la configuration courante et une candidate, et liste les
+flux qui changent de comportement — **avant** d'appliquer quoi que ce soit :
+
+<p align="center">
+  <img src="docs/assets/plan-avant-apres.svg" width="100%" alt="calque plan compare avant et après : un flux ROMPU (autorisé par la règle 12 avant, refusé par la règle 8 après), un flux CORRIGÉ (redevenu conforme), et une ouverture NOUVEAU — que personne n'a demandée — signalée en échec.">
+</p>
+
+```text
+$ calque plan --candidate fw-01-nouveau.conf
+
+2 flux change(nt) de comportement :
+
+  ROMPU    la comptabilité accède au serveur de fichiers
+           10.0.10.0/24 → 10.0.20.5:445/tcp
+           avant : autorisé par la règle 12 (fw-01.conf ligne 120)
+           après : refusé par la règle 8 (fw-01-nouveau.conf ligne 80)
+
+  CORRIGÉ  le wifi invité est isolé de l'administration
+           vlan-invite → vlan-admin
+           avant : autorisé à tort
+           après : refusé (conforme à l'attente)
+
+  NOUVEAU  10.0.30.0/24 → 10.0.20.0/24:80/tcp devient joignable
+           10.0.30.1 → 10.0.20.1:80/tcp
+           n'était couvert par aucun flux déclaré
+
+1 flux inchangé(s).
+```
+
 ### Vérifier ce que l'outil a compris
 
 ```bash
@@ -134,21 +177,13 @@ calque topology check           # liens ambigus ou manquants
 
 ## Architecture
 
-```
-texte de configuration
-        │
-        ▼  couche 1 : par FORMAT (blocs FortiGate, indentation IOS, XML…)
-   arbre de configuration générique          → calque-parse
-        │
-        ▼  couche 2 : par CONSTRUCTEUR (sémantique)
-   représentation intermédiaire              → calque-vendors
-        │
-        ▼
-   moteur d'accessibilité, traces            → calque-engine  (PUR)
-   algèbre de pavés 5D                       → calque-space   (PUR)
-   tests de flux, invariants                 → calque-policy  (PUR)
-   comparaison de modèles                    → calque-diff    (PUR)
-```
+Deux couches d'analyse, jamais une : la couche 1 ne connaît que le **format**
+(blocs FortiGate, indentation IOS, XML…), la couche 2 porte la **sémantique**
+du constructeur. Le moteur, lui, ne voit que la représentation intermédiaire.
+
+<p align="center">
+  <img src="docs/assets/deux-couches.svg" width="100%" alt="Pipeline d'analyse : le texte de configuration FortiGate devient (couche 1, par format) un arbre de configuration générique, puis (couche 2, par constructeur) une représentation intermédiaire — Rule { matches, action, source : ligne 82 } — consommée par le moteur pur.">
+</p>
 
 | Crate | Rôle | Pureté |
 |---|---|---|

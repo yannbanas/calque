@@ -1,0 +1,80 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 430" role="img"
+     aria-label="Une règle de filtrage est un pavé dans l'espace source × destination × port ; une politique est une liste ordonnée de pavés, et la soustraction découpe en pavés disjoints.">
+  <title>L'algèbre de pavés : une règle = un pavé, une politique = une liste ordonnée de pavés</title>
+
+  <style>
+    .pv-mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+    .pv-ui   { font-family: system-ui, sans-serif; }
+    .pv-int  { animation: pv-pulse 5s ease-in-out infinite; }
+    @keyframes pv-pulse { 0%, 100% { opacity: 0.35; } 50% { opacity: 0.8; } }
+    @media (prefers-reduced-motion: reduce) { .pv-int { animation: none; opacity: 0.6; } }
+  </style>
+
+  <defs>
+    <pattern id="pv-hachures" width="7" height="7" patternUnits="userSpaceOnUse" patternTransform="rotate(45)">
+      <rect width="7" height="7" fill="rgba(248,81,73,0.18)"/>
+      <line x1="0" y1="0" x2="0" y2="7" stroke="#f85149" stroke-width="2"/>
+    </pattern>
+  </defs>
+
+  <rect x="0" y="0" width="960" height="430" rx="12" fill="#0d1117"/>
+
+  <!-- ============ à gauche : une règle = un pavé ============ -->
+  <text x="48" y="52" class="pv-ui" font-size="13" fill="#8b949e">une règle de filtrage…</text>
+  <g class="pv-mono" font-size="13">
+    <text x="48" y="85"  fill="#8b949e">source       <tspan fill="#e6edf3">10.10.1.50–69</tspan></text>
+    <text x="48" y="107" fill="#8b949e">destination  <tspan fill="#e6edf3">10.10.2.10</tspan></text>
+    <text x="48" y="129" fill="#8b949e">protocole    <tspan fill="#e6edf3">tcp</tspan></text>
+    <text x="48" y="151" fill="#8b949e">port         <tspan fill="#e6edf3">8443</tspan></text>
+    <text x="48" y="173" fill="#8b949e">action       <tspan fill="#3fb950">accept</tspan></text>
+  </g>
+
+  <line x1="160" y1="192" x2="160" y2="222" stroke="#30363d" stroke-width="2"/>
+  <polygon points="155,222 160,232 165,222" fill="#30363d"/>
+  <text x="178" y="216" class="pv-ui" font-size="13" fill="#e6edf3">… est un pavé</text>
+
+  <!-- le pavé (cuboïde) -->
+  <polygon points="90,250 124,224 254,224 220,250" fill="rgba(63,185,80,0.06)" stroke="#3fb950" stroke-opacity="0.6"/>
+  <polygon points="220,250 254,224 254,314 220,340" fill="rgba(63,185,80,0.08)" stroke="#3fb950" stroke-opacity="0.6"/>
+  <rect x="90" y="250" width="130" height="90" fill="rgba(63,185,80,0.14)" stroke="#3fb950" stroke-width="1.6"/>
+  <text x="155" y="362" text-anchor="middle" class="pv-ui" font-size="12" fill="#8b949e">src →</text>
+  <text x="72" y="295" class="pv-ui" font-size="12" fill="#8b949e" transform="rotate(-90 72 295)" text-anchor="middle">port →</text>
+  <text x="262" y="216" class="pv-ui" font-size="12" fill="#8b949e">dst ↗</text>
+
+  <!-- ============ à droite : les pavés se combinent ============ -->
+  <!-- axes -->
+  <line x1="400" y1="360" x2="900" y2="360" stroke="#30363d" stroke-width="2"/>
+  <polygon points="900,355 910,360 900,365" fill="#30363d"/>
+  <line x1="400" y1="360" x2="400" y2="90" stroke="#30363d" stroke-width="2"/>
+  <polygon points="395,90 400,80 405,90" fill="#30363d"/>
+  <text x="650" y="386" text-anchor="middle" class="pv-ui" font-size="12.5" fill="#8b949e">destination : port →</text>
+  <text x="372" y="225" class="pv-ui" font-size="12.5" fill="#8b949e" transform="rotate(-90 372 225)" text-anchor="middle">source →</text>
+
+  <!-- pavé A : accept -->
+  <rect x="450" y="170" width="230" height="150" fill="rgba(63,185,80,0.10)" stroke="#3fb950" stroke-width="1.6"/>
+  <text x="462" y="192" class="pv-mono" font-size="12.5" font-weight="600" fill="#3fb950">règle 2 · accept</text>
+
+  <!-- pavé B : deny -->
+  <rect x="600" y="110" width="250" height="130" fill="rgba(248,81,73,0.10)" stroke="#f85149" stroke-width="1.6"/>
+  <text x="700" y="132" class="pv-mono" font-size="12.5" font-weight="600" fill="#f85149">règle 8 · deny</text>
+
+  <!-- l'intersection (hachurée, pulsation lente) -->
+  <rect x="600" y="170" width="80" height="70" fill="url(#pv-hachures)" class="pv-int"/>
+  <text x="500" y="118" class="pv-ui" font-size="12" fill="#f85149">l'intersection</text>
+  <line x1="560" y1="122" x2="612" y2="168" stroke="#f85149" stroke-width="1" opacity="0.6"/>
+
+  <!-- la soustraction découpe A \ B en pavés disjoints -->
+  <g stroke="#e6edf3" stroke-width="1.2" stroke-dasharray="5 4" opacity="0.55">
+    <line x1="600" y1="170" x2="600" y2="320"/>
+    <line x1="600" y1="240" x2="680" y2="240"/>
+  </g>
+  <text x="700" y="282" class="pv-ui" font-size="12" fill="#8b949e">la soustraction A \ B</text>
+  <text x="700" y="299" class="pv-ui" font-size="12" fill="#8b949e">découpe en pavés disjoints</text>
+  <line x1="695" y1="286" x2="650" y2="290" stroke="#8b949e" stroke-width="1" opacity="0.6"/>
+
+  <!-- légende -->
+  <text x="480" y="418" text-anchor="middle" class="pv-ui" font-size="13.5">
+    <tspan fill="#e6edf3">une politique = une liste ordonnée de pavés</tspan><tspan fill="#8b949e"> — la première correspondance gagne</tspan>
+  </text>
+</svg>
