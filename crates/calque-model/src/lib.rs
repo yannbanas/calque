@@ -275,7 +275,10 @@ pub struct PortRange {
 }
 
 impl PortRange {
-    pub const ANY: PortRange = PortRange { start: 0, end: 65535 };
+    pub const ANY: PortRange = PortRange {
+        start: 0,
+        end: 65535,
+    };
 
     pub fn single(p: u16) -> Self {
         Self { start: p, end: p }
@@ -469,10 +472,7 @@ impl Fidelity {
         match (self, other) {
             (Fidelity::Complete, f) => f,
             (f, Fidelity::Complete) => f,
-            (
-                Fidelity::Partial { unsupported: mut a },
-                Fidelity::Partial { unsupported: b },
-            ) => {
+            (Fidelity::Partial { unsupported: mut a }, Fidelity::Partial { unsupported: b }) => {
                 a.extend(b);
                 Fidelity::Partial { unsupported: a }
             }

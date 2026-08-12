@@ -4,10 +4,16 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+# Crate PUR (§1) : pas d'entrée-sortie. La lecture du fichier flows.yaml
+# vit dans calque-cli ; ici on ne fait que désérialiser des chaînes.
+#
+# NOTE coordination : les dépendances calque-space et calque-engine seront
+# ajoutées quand les invariants s'appuieront sur le moteur (S3+). Pour
+# l'instant, seul calque-model est nécessaire.
+
 [dependencies]
 calque-model = { workspace = true }
-calque-space = { workspace = true }
-calque-engine = { workspace = true }
 ipnet = { workspace = true }
 serde = { workspace = true }
 serde_yaml = { workspace = true }
+thiserror = { workspace = true }

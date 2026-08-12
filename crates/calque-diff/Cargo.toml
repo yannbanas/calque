@@ -4,8 +4,10 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+# Crate PUR (CALQUE-ARCHITECTURE.md §1) : aucune dépendance d'entrée-sortie.
+# La comparaison de COMPORTEMENT (S4) ajoutera calque-engine (pur) pour
+# rejouer les flux sur les deux modèles ; la comparaison STRUCTURELLE
+# n'a besoin que de calque-model.
 [dependencies]
 calque-model = { workspace = true }
-calque-space = { workspace = true }
-calque-engine = { workspace = true }
 serde = { workspace = true }

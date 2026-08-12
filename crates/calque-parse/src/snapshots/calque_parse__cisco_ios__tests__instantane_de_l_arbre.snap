@@ -1,0 +1,204 @@
+---
+source: crates/calque-parse/src/cisco_ios.rs
+expression: tree
+---
+ConfigTree {
+    roots: [
+        ConfigNode {
+            keyword: "version",
+            args: [
+                "15.2",
+            ],
+            children: [],
+            span: SourceSpan {
+                file: "sw-01.conf",
+                line: 1,
+                end_line: None,
+            },
+        },
+        ConfigNode {
+            keyword: "hostname",
+            args: [
+                "sw-01",
+            ],
+            children: [],
+            span: SourceSpan {
+                file: "sw-01.conf",
+                line: 3,
+                end_line: None,
+            },
+        },
+        ConfigNode {
+            keyword: "banner",
+            args: [
+                "motd",
+            ],
+            children: [],
+            span: SourceSpan {
+                file: "sw-01.conf",
+                line: 5,
+                end_line: Some(
+                    8,
+                ),
+            },
+        },
+        ConfigNode {
+            keyword: "interface",
+            args: [
+                "GigabitEthernet0/1",
+            ],
+            children: [
+                ConfigNode {
+                    keyword: "description",
+                    args: [
+                        "liaison",
+                        "vers",
+                        "fw-01",
+                    ],
+                    children: [],
+                    span: SourceSpan {
+                        file: "sw-01.conf",
+                        line: 11,
+                        end_line: None,
+                    },
+                },
+                ConfigNode {
+                    keyword: "ip",
+                    args: [
+                        "address",
+                        "10.0.20.1",
+                        "255.255.255.0",
+                    ],
+                    children: [],
+                    span: SourceSpan {
+                        file: "sw-01.conf",
+                        line: 12,
+                        end_line: None,
+                    },
+                },
+                ConfigNode {
+                    keyword: "no",
+                    args: [
+                        "shutdown",
+                    ],
+                    children: [],
+                    span: SourceSpan {
+                        file: "sw-01.conf",
+                        line: 13,
+                        end_line: None,
+                    },
+                },
+            ],
+            span: SourceSpan {
+                file: "sw-01.conf",
+                line: 10,
+                end_line: Some(
+                    13,
+                ),
+            },
+        },
+        ConfigNode {
+            keyword: "interface",
+            args: [
+                "GigabitEthernet0/2",
+            ],
+            children: [
+                ConfigNode {
+                    keyword: "switchport",
+                    args: [
+                        "mode",
+                        "access",
+                    ],
+                    children: [],
+                    span: SourceSpan {
+                        file: "sw-01.conf",
+                        line: 16,
+                        end_line: None,
+                    },
+                },
+                ConfigNode {
+                    keyword: "switchport",
+                    args: [
+                        "access",
+                        "vlan",
+                        "20",
+                    ],
+                    children: [],
+                    span: SourceSpan {
+                        file: "sw-01.conf",
+                        line: 17,
+                        end_line: None,
+                    },
+                },
+            ],
+            span: SourceSpan {
+                file: "sw-01.conf",
+                line: 15,
+                end_line: Some(
+                    17,
+                ),
+            },
+        },
+        ConfigNode {
+            keyword: "ip",
+            args: [
+                "access-list",
+                "extended",
+                "ACL-COMPTA",
+            ],
+            children: [
+                ConfigNode {
+                    keyword: "permit",
+                    args: [
+                        "tcp",
+                        "10.0.10.0",
+                        "0.0.0.255",
+                        "host",
+                        "10.0.20.5",
+                        "eq",
+                        "445",
+                    ],
+                    children: [],
+                    span: SourceSpan {
+                        file: "sw-01.conf",
+                        line: 20,
+                        end_line: None,
+                    },
+                },
+                ConfigNode {
+                    keyword: "deny",
+                    args: [
+                        "ip",
+                        "any",
+                        "any",
+                        "log",
+                    ],
+                    children: [],
+                    span: SourceSpan {
+                        file: "sw-01.conf",
+                        line: 21,
+                        end_line: None,
+                    },
+                },
+            ],
+            span: SourceSpan {
+                file: "sw-01.conf",
+                line: 19,
+                end_line: Some(
+                    21,
+                ),
+            },
+        },
+        ConfigNode {
+            keyword: "end",
+            args: [],
+            children: [],
+            span: SourceSpan {
+                file: "sw-01.conf",
+                line: 23,
+                end_line: None,
+            },
+        },
+    ],
+    file: "sw-01.conf",
+}

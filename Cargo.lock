@@ -122,13 +122,9 @@ checksum = "b588b76d00fde79687d7646a9b5bdf3cc0f655e0bbd080335a95d7e96f3587da"
 name = "calque-cli"
 version = "0.1.0"
 dependencies = [
- "calque-engine",
  "calque-model",
- "calque-parse",
  "calque-policy",
  "calque-report",
- "calque-space",
- "calque-vendors",
  "clap",
  "miette",
  "serde",
@@ -140,9 +136,7 @@ dependencies = [
 name = "calque-diff"
 version = "0.1.0"
 dependencies = [
- "calque-engine",
  "calque-model",
- "calque-space",
  "serde",
 ]
 
@@ -151,7 +145,6 @@ name = "calque-engine"
 version = "0.1.0"
 dependencies = [
  "calque-model",
- "calque-space",
  "ipnet",
  "serde",
 ]
@@ -168,6 +161,7 @@ dependencies = [
 name = "calque-parse"
 version = "0.1.0"
 dependencies = [
+ "calque-model",
  "insta",
  "serde",
  "thiserror",
@@ -177,19 +171,17 @@ dependencies = [
 name = "calque-policy"
 version = "0.1.0"
 dependencies = [
- "calque-engine",
  "calque-model",
- "calque-space",
  "ipnet",
  "serde",
  "serde_yaml",
+ "thiserror",
 ]
 
 [[package]]
 name = "calque-report"
 version = "0.1.0"
 dependencies = [
- "calque-engine",
  "calque-model",
  "serde",
  "serde_json",

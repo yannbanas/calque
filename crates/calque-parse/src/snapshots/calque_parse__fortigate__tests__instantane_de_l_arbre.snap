@@ -1,0 +1,441 @@
+---
+source: crates/calque-parse/src/fortigate.rs
+expression: tree
+---
+ConfigTree {
+    roots: [
+        ConfigNode {
+            keyword: "config",
+            args: [
+                "system",
+                "interface",
+            ],
+            children: [
+                ConfigNode {
+                    keyword: "edit",
+                    args: [
+                        "port1",
+                    ],
+                    children: [
+                        ConfigNode {
+                            keyword: "set",
+                            args: [
+                                "vdom",
+                                "root",
+                            ],
+                            children: [],
+                            span: SourceSpan {
+                                file: "fw-01.conf",
+                                line: 4,
+                                end_line: None,
+                            },
+                        },
+                        ConfigNode {
+                            keyword: "set",
+                            args: [
+                                "ip",
+                                "192.168.1.99",
+                                "255.255.255.0",
+                            ],
+                            children: [],
+                            span: SourceSpan {
+                                file: "fw-01.conf",
+                                line: 5,
+                                end_line: None,
+                            },
+                        },
+                        ConfigNode {
+                            keyword: "set",
+                            args: [
+                                "allowaccess",
+                                "ping",
+                                "https",
+                                "ssh",
+                            ],
+                            children: [],
+                            span: SourceSpan {
+                                file: "fw-01.conf",
+                                line: 6,
+                                end_line: None,
+                            },
+                        },
+                        ConfigNode {
+                            keyword: "set",
+                            args: [
+                                "alias",
+                                "port1 lan",
+                            ],
+                            children: [],
+                            span: SourceSpan {
+                                file: "fw-01.conf",
+                                line: 7,
+                                end_line: None,
+                            },
+                        },
+                        ConfigNode {
+                            keyword: "config",
+                            args: [
+                                "ipv6",
+                            ],
+                            children: [
+                                ConfigNode {
+                                    keyword: "set",
+                                    args: [
+                                        "ip6-allowaccess",
+                                        "ping",
+                                    ],
+                                    children: [],
+                                    span: SourceSpan {
+                                        file: "fw-01.conf",
+                                        line: 9,
+                                        end_line: None,
+                                    },
+                                },
+                            ],
+                            span: SourceSpan {
+                                file: "fw-01.conf",
+                                line: 8,
+                                end_line: Some(
+                                    10,
+                                ),
+                            },
+                        },
+                    ],
+                    span: SourceSpan {
+                        file: "fw-01.conf",
+                        line: 3,
+                        end_line: Some(
+                            11,
+                        ),
+                    },
+                },
+                ConfigNode {
+                    keyword: "edit",
+                    args: [
+                        "port2",
+                    ],
+                    children: [
+                        ConfigNode {
+                            keyword: "set",
+                            args: [
+                                "vdom",
+                                "root",
+                            ],
+                            children: [],
+                            span: SourceSpan {
+                                file: "fw-01.conf",
+                                line: 13,
+                                end_line: None,
+                            },
+                        },
+                        ConfigNode {
+                            keyword: "set",
+                            args: [
+                                "ip",
+                                "10.0.20.1",
+                                "255.255.255.0",
+                            ],
+                            children: [],
+                            span: SourceSpan {
+                                file: "fw-01.conf",
+                                line: 14,
+                                end_line: None,
+                            },
+                        },
+                    ],
+                    span: SourceSpan {
+                        file: "fw-01.conf",
+                        line: 12,
+                        end_line: Some(
+                            15,
+                        ),
+                    },
+                },
+            ],
+            span: SourceSpan {
+                file: "fw-01.conf",
+                line: 2,
+                end_line: Some(
+                    16,
+                ),
+            },
+        },
+        ConfigNode {
+            keyword: "config",
+            args: [
+                "firewall",
+                "address",
+            ],
+            children: [
+                ConfigNode {
+                    keyword: "edit",
+                    args: [
+                        "SRV-FICHIERS",
+                    ],
+                    children: [
+                        ConfigNode {
+                            keyword: "set",
+                            args: [
+                                "subnet",
+                                "10.0.20.5",
+                                "255.255.255.255",
+                            ],
+                            children: [],
+                            span: SourceSpan {
+                                file: "fw-01.conf",
+                                line: 20,
+                                end_line: None,
+                            },
+                        },
+                    ],
+                    span: SourceSpan {
+                        file: "fw-01.conf",
+                        line: 19,
+                        end_line: Some(
+                            21,
+                        ),
+                    },
+                },
+                ConfigNode {
+                    keyword: "edit",
+                    args: [
+                        "LAN-COMPTA",
+                    ],
+                    children: [
+                        ConfigNode {
+                            keyword: "set",
+                            args: [
+                                "subnet",
+                                "10.0.10.0",
+                                "255.255.255.0",
+                            ],
+                            children: [],
+                            span: SourceSpan {
+                                file: "fw-01.conf",
+                                line: 23,
+                                end_line: None,
+                            },
+                        },
+                    ],
+                    span: SourceSpan {
+                        file: "fw-01.conf",
+                        line: 22,
+                        end_line: Some(
+                            24,
+                        ),
+                    },
+                },
+            ],
+            span: SourceSpan {
+                file: "fw-01.conf",
+                line: 18,
+                end_line: Some(
+                    25,
+                ),
+            },
+        },
+        ConfigNode {
+            keyword: "config",
+            args: [
+                "firewall",
+                "policy",
+            ],
+            children: [
+                ConfigNode {
+                    keyword: "edit",
+                    args: [
+                        "1",
+                    ],
+                    children: [
+                        ConfigNode {
+                            keyword: "set",
+                            args: [
+                                "name",
+                                "compta vers serveur de fichiers",
+                            ],
+                            children: [],
+                            span: SourceSpan {
+                                file: "fw-01.conf",
+                                line: 29,
+                                end_line: None,
+                            },
+                        },
+                        ConfigNode {
+                            keyword: "set",
+                            args: [
+                                "srcintf",
+                                "port1",
+                            ],
+                            children: [],
+                            span: SourceSpan {
+                                file: "fw-01.conf",
+                                line: 30,
+                                end_line: None,
+                            },
+                        },
+                        ConfigNode {
+                            keyword: "set",
+                            args: [
+                                "dstintf",
+                                "port2",
+                            ],
+                            children: [],
+                            span: SourceSpan {
+                                file: "fw-01.conf",
+                                line: 31,
+                                end_line: None,
+                            },
+                        },
+                        ConfigNode {
+                            keyword: "set",
+                            args: [
+                                "srcaddr",
+                                "LAN-COMPTA",
+                            ],
+                            children: [],
+                            span: SourceSpan {
+                                file: "fw-01.conf",
+                                line: 32,
+                                end_line: None,
+                            },
+                        },
+                        ConfigNode {
+                            keyword: "set",
+                            args: [
+                                "dstaddr",
+                                "SRV-FICHIERS",
+                            ],
+                            children: [],
+                            span: SourceSpan {
+                                file: "fw-01.conf",
+                                line: 33,
+                                end_line: None,
+                            },
+                        },
+                        ConfigNode {
+                            keyword: "set",
+                            args: [
+                                "action",
+                                "accept",
+                            ],
+                            children: [],
+                            span: SourceSpan {
+                                file: "fw-01.conf",
+                                line: 34,
+                                end_line: None,
+                            },
+                        },
+                        ConfigNode {
+                            keyword: "set",
+                            args: [
+                                "schedule",
+                                "always",
+                            ],
+                            children: [],
+                            span: SourceSpan {
+                                file: "fw-01.conf",
+                                line: 35,
+                                end_line: None,
+                            },
+                        },
+                        ConfigNode {
+                            keyword: "set",
+                            args: [
+                                "service",
+                                "SMB",
+                                "HTTPS",
+                            ],
+                            children: [],
+                            span: SourceSpan {
+                                file: "fw-01.conf",
+                                line: 36,
+                                end_line: None,
+                            },
+                        },
+                    ],
+                    span: SourceSpan {
+                        file: "fw-01.conf",
+                        line: 28,
+                        end_line: Some(
+                            37,
+                        ),
+                    },
+                },
+                ConfigNode {
+                    keyword: "edit",
+                    args: [
+                        "2",
+                    ],
+                    children: [
+                        ConfigNode {
+                            keyword: "set",
+                            args: [
+                                "srcintf",
+                                "any",
+                            ],
+                            children: [],
+                            span: SourceSpan {
+                                file: "fw-01.conf",
+                                line: 39,
+                                end_line: None,
+                            },
+                        },
+                        ConfigNode {
+                            keyword: "set",
+                            args: [
+                                "dstintf",
+                                "any",
+                            ],
+                            children: [],
+                            span: SourceSpan {
+                                file: "fw-01.conf",
+                                line: 40,
+                                end_line: None,
+                            },
+                        },
+                        ConfigNode {
+                            keyword: "set",
+                            args: [
+                                "action",
+                                "deny",
+                            ],
+                            children: [],
+                            span: SourceSpan {
+                                file: "fw-01.conf",
+                                line: 41,
+                                end_line: None,
+                            },
+                        },
+                        ConfigNode {
+                            keyword: "unset",
+                            args: [
+                                "status",
+                            ],
+                            children: [],
+                            span: SourceSpan {
+                                file: "fw-01.conf",
+                                line: 42,
+                                end_line: None,
+                            },
+                        },
+                    ],
+                    span: SourceSpan {
+                        file: "fw-01.conf",
+                        line: 38,
+                        end_line: Some(
+                            43,
+                        ),
+                    },
+                },
+            ],
+            span: SourceSpan {
+                file: "fw-01.conf",
+                line: 27,
+                end_line: Some(
+                    44,
+                ),
+            },
+        },
+    ],
+    file: "fw-01.conf",
+}

@@ -1,0 +1,61 @@
+# deny.toml — configuration cargo-deny pour Calque.
+#
+# Politique : projet sous Apache-2.0, on n'accepte que des licences
+# permissives compatibles. Tout ce qui n'est pas explicitement autorisé
+# ci-dessous est REFUSÉ — en particulier les licences copyleft fortes
+# (GPL-2.0, GPL-3.0, AGPL, LGPL, MPL, SSPL, ...) : cargo-deny rejette
+# par défaut toute licence hors de la liste `allow`.
+
+[graph]
+# Vérifier aussi les dépendances des fonctionnalités optionnelles
+# (calque-collect et sa pile SSH, quand ils existeront).
+all-features = true
+
+[licenses]
+allow = [
+    "Apache-2.0",
+    "MIT",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "Unicode-3.0",
+    "ISC",
+    "Zlib",
+]
+# Ne pas deviner une licence à partir d'un texte ambigu.
+confidence-threshold = 0.93
+
+[licenses.private]
+# Les crates du workspace ne sont pas publiés pour l'instant.
+ignore = true
+
+[advisories]
+# Base RustSec : une vulnérabilité connue fait échouer l'intégration continue.
+db-path = "$CARGO_HOME/advisory-dbs"
+db-urls = ["https://github.com/rustsec/advisory-db"]
+yanked = "deny"
+# Pas d'exception pour l'instant. Toute exception future doit être datée
+# et justifiée ici.
+ignore = []
+
+[bans]
+# Plusieurs versions d'un même crate : toléré (transitif, fréquent),
+# mais signalé pour garder l'arbre sous contrôle.
+multiple-versions = "warn"
+# Un `version = "*"` est une absence de décision.
+wildcards = "deny"
+highlight = "all"
+# Le cœur est pur (§1 de CALQUE-ARCHITECTURE.md) : ces crates n'ont
+# rien à faire dans l'arbre par défaut. `russh` sera autorisé plus tard
+# UNIQUEMENT derrière la fonctionnalité optionnelle de calque-collect ;
+# la pureté des crates du cœur est de toute façon vérifiée séparément
+# par scripts/check-purity.{sh,ps1}.
+deny = [
+    { crate = "openssl", reason = "TLS natif interdit : surface d'attaque et compilation pénible ; rustls si un jour nécessaire" },
+    { crate = "openssl-sys", reason = "voir openssl" },
+]
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []

@@ -1,0 +1,24 @@
+# flows.example.yaml — la suite de tests du réseau (CALQUE-ARCHITECTURE.md §10.1).
+#
+# Copier vers flows.yaml, adapter à votre réseau, puis :
+#   calque test                 # code de sortie non nul si un flux dévie
+#   calque test --format junit  # pour l'intégration continue
+
+flows:
+  - name: la comptabilité accède au serveur de fichiers
+    from: 10.0.10.0/24
+    to:   10.0.20.5
+    port: 445/tcp
+    expect: allow
+
+  - name: le wifi invité est isolé de l'administration
+    from: vlan-invite
+    to:   vlan-admin
+    port: any
+    expect: deny
+
+  - name: la supervision joint tous les commutateurs
+    from: 10.0.99.10
+    to:   groupe:commutateurs
+    port: 22/tcp
+    expect: allow

@@ -8,13 +8,16 @@ license.workspace = true
 name = "calque"
 path = "src/main.rs"
 
+# NOTE coordination : calque-engine, calque-parse, calque-vendors et
+# calque-space sont implémentés en parallèle. Le binaire doit compiler quoi
+# qu'il arrive, donc ces dépendances restent débranchées tant que leurs API
+# ne sont pas posées : les points d'entrée correspondants vivent dans
+# `src/backend.rs` et rendent une erreur honnête à l'exécution. Rebrancher
+# ici (et dans backend.rs) dès qu'un crate est prêt.
+
 [dependencies]
 calque-model = { workspace = true }
-calque-space = { workspace = true }
-calque-engine = { workspace = true }
 calque-policy = { workspace = true }
-calque-parse = { workspace = true }
-calque-vendors = { workspace = true }
 calque-report = { workspace = true }
 clap = { workspace = true }
 miette = { workspace = true }
