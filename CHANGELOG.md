@@ -7,7 +7,11 @@ majeur.
 
 ## [Unreleased]
 
-État actuel du développement v0 : les étapes S1 à S6 de
+Rien pour l'instant.
+
+## [0.1.0] — 2026-08-12
+
+Première version publiée. Les étapes S1 à S6 de
 [CALQUE-ARCHITECTURE.md](CALQUE-ARCHITECTURE.md) sont livrées. L'outil
 fonctionne de bout en bout sur le corpus, mais n'est pas encore éprouvé
 sur des configurations de production.
@@ -39,7 +43,9 @@ sur des configurations de production.
   sortie texte ou JUnit, code de sortie non nul en cas d'écart),
   `calque plan --candidate` (flux rompus, corrigés, et ouvertures que
   personne n'a demandées), `calque topology check` (liens inférés par
-  sous-réseau + `topology.yaml`).
+  sous-réseau + `topology.yaml`), `calque scrub` (anonymisation cohérente :
+  relations de sous-réseau préservées, secrets caviardés, table de
+  correspondance optionnelle via `--map`).
 - **Validation** : tests de propriétés (`proptest`) sur l'algèbre,
   instantanés (`insta`) sur les analyseurs, corpus de configurations
   anonymisées avec réponses attendues, fuzzing hebdomadaire des
@@ -61,4 +67,5 @@ sur des configurations de production.
 - Pas éprouvé sur des configurations de production ; les retours de
   terrain sont bienvenus.
 
-[Unreleased]: https://github.com/yannbanas/calque/commits/main
+[Unreleased]: https://github.com/yannbanas/calque/compare/v0.1.0...HEAD
+[0.1.0]: https://github.com/yannbanas/calque/releases/tag/v0.1.0
