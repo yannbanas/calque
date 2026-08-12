@@ -43,6 +43,9 @@ ignore = []
 multiple-versions = "warn"
 # Un `version = "*"` est une absence de décision.
 wildcards = "deny"
+# ... mais les dépendances internes du workspace (par chemin, sans
+# version) ne sont pas des wildcards au sens de cette règle.
+allow-wildcard-paths = true
 highlight = "all"
 # Le cœur est pur (§1 de CALQUE-ARCHITECTURE.md) : ces crates n'ont
 # rien à faire dans l'arbre par défaut. `russh` sera autorisé plus tard
