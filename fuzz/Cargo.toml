@@ -1,0 +1,42 @@
+[package]
+name = "calque-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+license = "Apache-2.0"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+calque-parse = { path = "../crates/calque-parse" }
+calque-vendors = { path = "../crates/calque-vendors" }
+
+[[bin]]
+name = "parse_fortigate"
+path = "fuzz_targets/parse_fortigate.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "parse_cisco_ios"
+path = "fuzz_targets/parse_cisco_ios.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "import_fortigate"
+path = "fuzz_targets/import_fortigate.rs"
+test = false
+doc = false
+bench = false
+
+# Traces exploitables dans les artefacts de crash.
+[profile.release]
+debug = 1
+
+# Espace de travail autonome : le Cargo.toml racine exclut `fuzz/`.
+[workspace]

@@ -52,37 +52,83 @@ impl HeaderSet {
     /// C'est la comparaison à utiliser pour l'égalité d'ensembles
     /// (dans les deux sens), `Eq` n'étant que structurel.
     pub fn contains_set(&self, other: &HeaderSet) -> bool {
+        // Chemin rapide sans allocation : chaque pavé de `other` contenu
+        // dans UN pavé de `self`. C'est SUFFISANT mais pas nécessaire
+        // (un pavé peut être couvert par plusieurs pavés de `self`) :
+        // en cas d'échec, on retombe sur le test exact par soustraction.
+        if other
+            .cubes
+            .iter()
+            .all(|b| self.cubes.iter().any(|a| a.contains_cube(b)))
+        {
+            return true;
+        }
         other.subtract(self).is_empty()
     }
 
+    /// Vrai si les deux ensembles n'ont aucun paquet en commun.
+    ///
+    /// Test direct, sans allocation : deux unions de pavés sont disjointes
+    /// si et seulement si chaque paire de pavés est disjointe, et deux
+    /// pavés sont disjoints dès qu'UNE dimension l'est.
+    pub fn is_disjoint(&self, other: &HeaderSet) -> bool {
+        self.cubes
+            .iter()
+            .all(|a| other.cubes.iter().all(|b| a.is_disjoint(b)))
+    }
+
     /// Normalisation : suppression des pavés vides, fusions exactes
-    /// jusqu'au point fixe (chaque fusion réduit le nombre de pavés,
-    /// donc la boucle termine), puis tri pour le déterminisme.
+    /// jusqu'au point fixe, puis tri pour le déterminisme.
+    ///
+    /// Le point fixe est atteint INCRÉMENTALEMENT : chaque pavé est inséré
+    /// par [`Self::insert_merged`] dans une liste maintenue sans paire
+    /// fusionnable, ce qui évite de rebalayer toutes les paires après
+    /// chaque fusion (l'ancien algorithme relançait un balayage complet et
+    /// devenait cubique sur les grandes unions).
     ///
     /// Les fusions préservent la disjonction : l'union exacte de deux
     /// pavés disjoints du reste demeure disjointe du reste.
-    fn normalized(mut cubes: Vec<Cube>) -> Self {
-        cubes.retain(|c| !c.is_empty());
-        loop {
-            let mut merged = None;
-            'search: for i in 0..cubes.len() {
-                for j in (i + 1)..cubes.len() {
-                    if let Some(m) = cubes[i].try_merge(&cubes[j]) {
-                        merged = Some((i, j, m));
-                        break 'search;
-                    }
-                }
-            }
-            match merged {
-                Some((i, j, m)) => {
-                    cubes[i] = m;
-                    cubes.swap_remove(j);
-                }
-                None => break,
+    ///
+    /// COMPLEXITÉ ET BORNE (audit 2026-08-12, R3) : quadratique dans le
+    /// nombre de pavés, sans garde interne — ce crate reste une algèbre
+    /// pure et totale, il ne décide pas d'un budget. C'est à l'APPELANT de
+    /// borner la fragmentation quand l'entrée est hostile : le moteur le
+    /// fait (`MAX_CUBES` dans `calque-engine::symtrace`), et tout nouvel
+    /// usage sur des ensembles issus d'une configuration non fiable doit
+    /// faire de même.
+    fn normalized(cubes: Vec<Cube>) -> Self {
+        let mut out: Vec<Cube> = Vec::with_capacity(cubes.len());
+        for c in cubes {
+            if !c.is_empty() {
+                Self::insert_merged(&mut out, c);
             }
         }
-        cubes.sort();
-        Self { cubes }
+        out.sort();
+        Self { cubes: out }
+    }
+
+    /// Insère `c` dans `out`, une liste SANS paire fusionnable (invariant
+    /// d'entrée et de sortie), en cascadant les fusions : tant que `c`
+    /// fusionne avec un élément, l'élément est retiré et le fusionné
+    /// reprend sa place de candidat. Chaque cascade retire un élément de
+    /// `out`, donc la boucle termine.
+    fn insert_merged(out: &mut Vec<Cube>, mut c: Cube) {
+        loop {
+            let merged = out
+                .iter()
+                .enumerate()
+                .find_map(|(i, existing)| existing.try_merge(&c).map(|m| (i, m)));
+            match merged {
+                Some((i, m)) => {
+                    out.swap_remove(i);
+                    c = m;
+                }
+                None => {
+                    out.push(c);
+                    return;
+                }
+            }
+        }
     }
 }
 
@@ -109,10 +155,13 @@ impl HeaderSpace for HeaderSet {
         let mut out = Vec::new();
         for a in &self.cubes {
             for b in &other.cubes {
-                let c = a.intersect(b);
-                if !c.is_empty() {
-                    out.push(c);
+                // Écarte les paires disjointes SANS construire l'intersection
+                // (le test est sans allocation) : c'est le cas dominant sur
+                // des ensembles peu chevauchants.
+                if a.is_disjoint(b) {
+                    continue;
                 }
+                out.push(a.intersect(b));
             }
         }
         Self::normalized(out)
@@ -120,21 +169,51 @@ impl HeaderSpace for HeaderSet {
 
     /// Union disjointe : A ∪ B = A + (B \ A), ce qui maintient l'invariant
     /// de disjonction sans redécouper A.
+    ///
+    /// `self` étant déjà normalisé (sans paire fusionnable), seuls les
+    /// morceaux de B \ A ont besoin d'être insérés avec fusion — inutile
+    /// de re-normaliser A entier.
     fn union(&self, other: &Self) -> Self {
         let mut cubes = self.cubes.clone();
-        cubes.extend(other.subtract(self).cubes);
-        Self::normalized(cubes)
+        for piece in other.subtract(self).cubes {
+            Self::insert_merged(&mut cubes, piece);
+        }
+        cubes.sort();
+        Self { cubes }
     }
 
     /// `self \ other` : chaque pavé de A est découpé successivement par
     /// chaque pavé de B (cf. [`Cube::subtract`]). Les morceaux issus de
     /// pavés disjoints restent disjoints.
+    ///
+    /// Deux économies mesurées sur les grands ensembles :
+    /// - un pavé disjoint du soustracteur est DÉPLACÉ tel quel (aucune
+    ///   copie, aucune découpe) ;
+    /// - si aucun pavé n'a été découpé, le résultat est `self` inchangé,
+    ///   déjà normalisé : la re-normalisation est inutile.
     fn subtract(&self, other: &Self) -> Self {
         let mut work = self.cubes.clone();
+        let mut changed = false;
         for b in &other.cubes {
-            work = work.iter().flat_map(|a| a.subtract(b)).collect();
+            if work.iter().all(|a| a.is_disjoint(b)) {
+                continue;
+            }
+            changed = true;
+            let mut next = Vec::with_capacity(work.len() + 4);
+            for a in work {
+                if a.is_disjoint(b) {
+                    next.push(a);
+                } else {
+                    next.extend(a.subtract(b));
+                }
+            }
+            work = next;
         }
-        Self::normalized(work)
+        if changed {
+            Self::normalized(work)
+        } else {
+            Self { cubes: work }
+        }
     }
 
     fn contains(&self, pkt: &ConcretePacket) -> bool {

@@ -1,0 +1,145 @@
+# Publication d'une version : sur tag `v*`, construit le binaire `calque`
+# en release pour les quatre cibles, archive chaque binaire
+# (`calque-<version>-<cible>.tar.gz` / `.zip`), calcule les sommes SHA256,
+# puis crée la GitHub Release avec les artefacts et les notes tirées du
+# CHANGELOG.
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: build (${{ matrix.target }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-musl
+            os: ubuntu-latest
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+          - target: aarch64-apple-darwin
+            os: macos-latest
+          # Compilation croisée depuis le runner arm64 : le SDK macOS
+          # fournit les deux architectures.
+          - target: x86_64-apple-darwin
+            os: macos-latest
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      # L'édition de liens statique musl exige musl-gcc.
+      - name: Outils musl
+        if: matrix.target == 'x86_64-unknown-linux-musl'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y musl-tools
+
+      - name: Construire
+        run: cargo build --release --locked -p calque-cli --target ${{ matrix.target }}
+
+      # Archive + somme SHA256, en bash sur les trois systèmes (Git Bash
+      # sur Windows). Nom : calque-<version>-<cible>.<ext>.
+      - name: Empaqueter
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#v}"
+          target="${{ matrix.target }}"
+          base="calque-${version}-${target}"
+          mkdir -p "dist/${base}"
+          if [[ "$target" == *windows* ]]; then
+            bin="target/${target}/release/calque.exe"
+          else
+            bin="target/${target}/release/calque"
+          fi
+          cp "$bin" "dist/${base}/"
+          cp LICENSE README.md CHANGELOG.md "dist/${base}/"
+          cd dist
+          if [[ "$target" == *windows* ]]; then
+            archive="${base}.zip"
+            7z a "$archive" "$base" > /dev/null
+          else
+            archive="${base}.tar.gz"
+            tar czf "$archive" "$base"
+          fi
+          if command -v sha256sum > /dev/null; then
+            sha256sum "$archive" > "${archive}.sha256"
+          else
+            shasum -a 256 "$archive" > "${archive}.sha256"
+          fi
+          rm -r "$base"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist-${{ matrix.target }}
+          path: dist/*
+          if-no-files-found: error
+
+  release:
+    name: publier la release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          pattern: dist-*
+          merge-multiple: true
+
+      # Somme de contrôle agrégée, plus simple à vérifier d'un bloc.
+      - name: SHA256SUMS
+        run: |
+          set -euo pipefail
+          cd dist
+          cat ./*.sha256 > SHA256SUMS
+          cat SHA256SUMS
+
+      # Les notes de version sont la section du CHANGELOG correspondant
+      # au tag ; à défaut, un renvoi vers le fichier.
+      - name: Notes depuis le CHANGELOG
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#v}"
+          awk -v ver="$version" '
+            /^## \[/ {
+              inside = ($0 ~ "^## \\[" ver "\\]")
+              next
+            }
+            inside { print }
+          ' CHANGELOG.md | sed -e '/./,$!d' > notes.md
+          if [ ! -s notes.md ]; then
+            {
+              echo "Voir [CHANGELOG.md](https://github.com/${GITHUB_REPOSITORY}/blob/main/CHANGELOG.md)."
+            } > notes.md
+          fi
+          cat notes.md
+
+      - name: Créer la GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: ${{ github.ref_name }}
+          body_path: notes.md
+          files: |
+            dist/calque-*
+            dist/SHA256SUMS
+          draft: false
+          prerelease: ${{ contains(github.ref_name, '-') }}

@@ -7,7 +7,7 @@ publish = false
 description = "Anonymisation cohérente des configurations réseau (§11.4)"
 
 [dependencies]
-ipnet = { workspace = true }
+calque-parse = { workspace = true }
 
 [dev-dependencies]
-calque-parse = { workspace = true }
+ipnet = { workspace = true }

@@ -1,0 +1,5 @@
+# Sorties de cargo-fuzz. Le corpus de départ (corpus/) et les crashs
+# archivés (regressions/) sont versionnés, eux.
+target/
+artifacts/
+coverage/

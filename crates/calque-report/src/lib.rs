@@ -16,7 +16,8 @@
 use std::fmt;
 use std::fmt::Write as _;
 
-use calque_model::{ConcretePacket, SourceSpan};
+use calque_model::{ConcretePacket, Diagnostic, Severity, SourceSpan};
+use calque_space::{Cube, HeaderSet, PortRanges, PrefixSet, ProtoSet};
 use serde::{Deserialize, Serialize};
 
 // ---------------------------------------------------------------------------
@@ -170,8 +171,143 @@ pub fn render_trace_json(trace: &TraceView) -> String {
     })
 }
 
+/// Libellé français d'un numéro de protocole IP.
+fn proto_label(proto: u8) -> String {
+    match proto {
+        1 => "icmp".to_owned(),
+        6 => "tcp".to_owned(),
+        17 => "udp".to_owned(),
+        58 => "icmpv6".to_owned(),
+        n => format!("proto {n}"),
+    }
+}
+
+/// Libellé d'un paquet concret : `10.0.10.5 → 10.0.20.5:445/tcp`.
+pub fn format_packet(p: &ConcretePacket) -> String {
+    format!("{} → {}:{}/{}", p.src, p.dst, p.dport, proto_label(p.proto))
+}
+
 fn packet_label(p: &ConcretePacket) -> String {
-    format!("{} → {}:{}/proto {}", p.src, p.dst, p.dport, p.proto)
+    format_packet(p)
+}
+
+// ---------------------------------------------------------------------------
+// Résumé lisible d'un HeaderSet (mode symbolique, §5.3)
+// ---------------------------------------------------------------------------
+
+/// Nombre maximal de pavés affichés par ensemble ; au-delà,
+/// « … et N autres pavé(s) ».
+pub const MAX_CUBES_SHOWN: usize = 10;
+
+/// Nombre maximal de préfixes affichés par dimension d'un pavé ; au-delà,
+/// « … (+N) ».
+const MAX_PREFIXES_SHOWN: usize = 6;
+
+/// Résumé d'une dimension adresse : `*` pour l'espace entier, sinon les
+/// préfixes (borné), les /32 et /128 rendus en adresse nue.
+fn prefixes_label(set: &PrefixSet) -> String {
+    if *set == PrefixSet::full() {
+        return "*".to_owned();
+    }
+    let mut parts: Vec<String> = set
+        .prefixes()
+        .iter()
+        .take(MAX_PREFIXES_SHOWN)
+        .map(|p| {
+            if p.prefix_len() == p.max_prefix_len() {
+                p.addr().to_string()
+            } else {
+                p.to_string()
+            }
+        })
+        .collect();
+    let hidden = set.prefixes().len().saturating_sub(MAX_PREFIXES_SHOWN);
+    if hidden > 0 {
+        parts.push(format!("… (+{hidden})"));
+    }
+    parts.join(", ")
+}
+
+/// Résumé d'un ensemble de ports : `*` pour tous, sinon `445` ou `7000-7010`.
+fn ports_label(set: &PortRanges) -> String {
+    if *set == PortRanges::full() {
+        return "*".to_owned();
+    }
+    set.ranges()
+        .iter()
+        .map(|r| {
+            if r.start == r.end {
+                r.start.to_string()
+            } else {
+                format!("{}-{}", r.start, r.end)
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+/// Résumé d'un ensemble de protocoles : `any` pour tous, sinon les noms.
+fn protos_label(set: &ProtoSet) -> String {
+    if *set == ProtoSet::full() {
+        return "any".to_owned();
+    }
+    let mut names: Vec<String> = Vec::new();
+    for proto in 0..=255u8 {
+        if set.contains_proto(proto) {
+            names.push(proto_label(proto));
+            if names.len() > 4 {
+                // Résumé volontairement court : au-delà de quatre
+                // protocoles, seul le décompte est utile.
+                return format!("{} protocoles", set.len());
+            }
+        }
+    }
+    names.join(",")
+}
+
+/// Résumé d'un pavé : `10.0.0.0/24 → 10.0.20.5:445/tcp`.
+///
+/// Le port source n'est mentionné que s'il est contraint (cas rare).
+pub fn format_cube(cube: &Cube) -> String {
+    let service = if cube.proto == ProtoSet::full() && cube.dport == PortRanges::full() {
+        ":any".to_owned()
+    } else {
+        format!(
+            ":{}/{}",
+            ports_label(&cube.dport),
+            protos_label(&cube.proto)
+        )
+    };
+    let mut out = format!(
+        "{} → {}{}",
+        prefixes_label(&cube.src),
+        prefixes_label(&cube.dst),
+        service
+    );
+    if cube.sport != PortRanges::full() {
+        let _ = write!(out, " (port source {})", ports_label(&cube.sport));
+    }
+    out
+}
+
+/// Résumé lisible d'un [`HeaderSet`] : une ligne par pavé
+/// (« 10.0.0.0/24 → 10.0.20.5:445/tcp »), borné à [`MAX_CUBES_SHOWN`]
+/// pavés puis « … et N autres pavé(s) ». Vide → « (ensemble vide) ».
+pub fn format_headerset(set: &HeaderSet) -> Vec<String> {
+    if set.cubes().is_empty() {
+        return vec!["(ensemble vide)".to_owned()];
+    }
+    let mut lines: Vec<String> = set
+        .cubes()
+        .iter()
+        .take(MAX_CUBES_SHOWN)
+        .map(format_cube)
+        .collect();
+    let hidden = set.cubes().len().saturating_sub(MAX_CUBES_SHOWN);
+    if hidden > 0 {
+        lines.push(format!("… et {hidden} autre(s) pavé(s)"));
+    }
+    lines
 }
 
 // ---------------------------------------------------------------------------
@@ -422,6 +558,272 @@ fn xml_escape(s: &str) -> String {
 }
 
 // ---------------------------------------------------------------------------
+// Vue d'un rapport `calque reach` (mode symbolique, §5.3)
+// ---------------------------------------------------------------------------
+
+/// Une décision de la chaîne d'un flux symbolique, étiquetée par
+/// l'équipement qui l'a prise.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReachDecisionView {
+    pub device: String,
+    pub decision: DecisionView,
+}
+
+/// Un flux autorisé trouvé par le mode symbolique : point d'entrée,
+/// ensemble, exemple concret et chaîne des règles décisives.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReachFlowView {
+    /// Le point d'entrée : `fw-01/lan`.
+    pub entry: String,
+    /// Le sous-ensemble autorisé (exprimé après traductions d'adresse).
+    pub set: HeaderSet,
+    /// Un paquet concret exemple du sous-ensemble (§4.1).
+    pub sample: ConcretePacket,
+    pub decisions: Vec<ReachDecisionView>,
+}
+
+/// Le rapport de `calque reach`, prêt à rendre.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReachView {
+    /// La question posée, déjà libellée :
+    /// « tout ce qui peut atteindre 10.0.20.5:445/tcp ».
+    pub question: String,
+    pub flows: Vec<ReachFlowView>,
+    /// Parts non décidables et incidents (§6.3) : affichés honnêtement,
+    /// le rapport est incomplet s'il y a des erreurs.
+    pub diagnostics: Vec<Diagnostic>,
+}
+
+/// La justification finale d'un flux : la dernière décision portée par une
+/// règle — « autorisé par la règle 2 (fw-01.conf ligne 82) ».
+fn reach_flow_justification(flow: &ReachFlowView) -> Option<String> {
+    flow.decisions
+        .iter()
+        .rev()
+        .find(|d| d.decision.rule.is_some())
+        .map(|d| {
+            let rule = d.decision.rule.as_deref().unwrap_or("?");
+            match &d.decision.source {
+                Some(span) => format!("autorisé par la règle {rule} ({span})"),
+                None => format!("autorisé par la règle {rule}"),
+            }
+        })
+}
+
+fn severity_label(s: Severity) -> &'static str {
+    match s {
+        Severity::Info => "info",
+        Severity::Warning => "avertissement",
+        Severity::Error => "erreur",
+    }
+}
+
+fn render_diagnostics(out: &mut String, diagnostics: &[Diagnostic]) {
+    for d in diagnostics {
+        let label = severity_label(d.severity);
+        match &d.span {
+            Some(span) => {
+                let _ = writeln!(out, "  [{label}] {span} : {}", d.message);
+            }
+            None => {
+                let _ = writeln!(out, "  [{label}] {}", d.message);
+            }
+        }
+    }
+}
+
+fn render_decision_line(out: &mut String, indent: &str, device: &str, d: &DecisionView) {
+    let _ = write!(out, "{indent}{device} : {} : {}", d.stage, d.outcome);
+    if let Some(rule) = &d.rule {
+        let _ = write!(out, " (règle {rule}");
+        if let Some(span) = &d.source {
+            let _ = write!(out, ", {span}");
+        }
+        let _ = write!(out, ")");
+    } else if let Some(span) = &d.source {
+        let _ = write!(out, " ({span})");
+    }
+    let _ = writeln!(out);
+    if !d.shadowed_by.is_empty() {
+        let _ = writeln!(
+            out,
+            "{indent}  masquée par les règles antérieures : {}",
+            d.shadowed_by.join(", ")
+        );
+    }
+}
+
+/// Rendu texte d'un rapport de `calque reach` : pour chaque flux trouvé,
+/// le point d'entrée, l'ensemble résumé, un paquet exemple et la chaîne
+/// des règles décisives (fichier + ligne).
+pub fn render_reach_text(view: &ReachView) -> String {
+    let mut out = String::new();
+    let _ = writeln!(out, "{} :", view.question);
+    for (i, flow) in view.flows.iter().enumerate() {
+        let _ = writeln!(out, "\n  {}. entrée {}", i + 1, flow.entry);
+        let set_lines = format_headerset(&flow.set);
+        let _ = writeln!(out, "     ensemble : {}", set_lines[0]);
+        for line in &set_lines[1..] {
+            let _ = writeln!(out, "                {line}");
+        }
+        let _ = writeln!(out, "     exemple  : {}", format_packet(&flow.sample));
+        if let Some(justification) = reach_flow_justification(flow) {
+            let _ = writeln!(out, "     {justification}");
+        }
+        if !flow.decisions.is_empty() {
+            let _ = writeln!(out, "     chaîne des décisions :");
+            for d in &flow.decisions {
+                render_decision_line(&mut out, "       ", &d.device, &d.decision);
+            }
+        }
+    }
+    if view.flows.is_empty() {
+        let _ = writeln!(out, "\nAucun flux autorisé trouvé.");
+    } else {
+        let _ = writeln!(out, "\n{} flux autorisé(s).", view.flows.len());
+    }
+    if !view.diagnostics.is_empty() {
+        let _ = writeln!(
+            out,
+            "\n{} part(s) non décidable(s) ou incident(s) — le rapport est \
+             incomplet sur ces parts (§6.3, jamais devinées) :",
+            view.diagnostics.len()
+        );
+        render_diagnostics(&mut out, &view.diagnostics);
+    }
+    out
+}
+
+/// Rendu JSON d'un rapport de `calque reach`.
+pub fn render_reach_json(view: &ReachView) -> String {
+    serde_json::to_string_pretty(view)
+        .unwrap_or_else(|e| format!("{{\"erreur\":\"échec de sérialisation : {e}\"}}"))
+}
+
+// ---------------------------------------------------------------------------
+// Vue d'un rapport de règles mortes (S6)
+// ---------------------------------------------------------------------------
+
+/// Pourquoi la règle est morte, côté rendu.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum DeadRuleKindView {
+    /// Entièrement couverte par l'union des règles antérieures.
+    Shadowed,
+    /// Le pavé de la règle est vide (objets ou groupes vides).
+    EmptySet,
+}
+
+impl DeadRuleKindView {
+    /// Préfixe affiché dans la sortie texte.
+    pub fn prefix(self) -> &'static str {
+        match self {
+            DeadRuleKindView::Shadowed => "MASQUÉE",
+            DeadRuleKindView::EmptySet => "ENSEMBLE VIDE",
+        }
+    }
+}
+
+impl fmt::Display for DeadRuleKindView {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.prefix())
+    }
+}
+
+/// Une règle masquante : identifiant et origine de configuration.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MaskerView {
+    pub rule: String,
+    pub source: SourceSpan,
+}
+
+/// Une règle morte, avec sa justification complète.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeadRuleView {
+    pub device: String,
+    pub policy: String,
+    pub rule: String,
+    /// Fichier + ligne de la règle morte.
+    pub source: SourceSpan,
+    pub kind: DeadRuleKindView,
+    /// Les règles antérieures qui la masquent (vide pour `EmptySet`).
+    pub masked_by: Vec<MaskerView>,
+    /// Un paquet concret que la règle aurait traité mais qu'un masque
+    /// capte avant elle (`None` pour `EmptySet`).
+    pub sample: Option<ConcretePacket>,
+}
+
+/// Le rapport des règles mortes, prêt à rendre.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeadRulesView {
+    /// Nombre d'équipements analysés.
+    pub devices: usize,
+    pub rules: Vec<DeadRuleView>,
+}
+
+/// Rendu texte du rapport des règles mortes.
+pub fn render_dead_rules_text(view: &DeadRulesView) -> String {
+    let mut out = String::new();
+    for r in &view.rules {
+        let _ = writeln!(
+            out,
+            "  {:<14}règle {} (politique {}, équipement « {} ») — {}",
+            r.kind.prefix(),
+            r.rule,
+            r.policy,
+            r.device,
+            r.source
+        );
+        match r.kind {
+            DeadRuleKindView::EmptySet => {
+                let _ = writeln!(
+                    out,
+                    "                ne peut correspondre à aucun paquet \
+                     (objets ou groupes vides)"
+                );
+            }
+            DeadRuleKindView::Shadowed => {
+                let maskers = r
+                    .masked_by
+                    .iter()
+                    .map(|m| format!("la règle {} ({})", m.rule, m.source))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                let _ = writeln!(out, "                masquée par : {maskers}");
+                if let Some(sample) = &r.sample {
+                    let _ = writeln!(
+                        out,
+                        "                paquet témoin : {} (capté par un masque \
+                         avant elle)",
+                        format_packet(sample)
+                    );
+                }
+            }
+        }
+        let _ = writeln!(out);
+    }
+    if view.rules.is_empty() {
+        let _ = writeln!(
+            out,
+            "Aucune règle morte : chaque règle peut encore décider d'au moins \
+             un paquet."
+        );
+    }
+    let _ = writeln!(
+        out,
+        "{} équipement(s) analysé(s), {} règle(s) morte(s).",
+        view.devices,
+        view.rules.len()
+    );
+    out
+}
+
+/// Rendu JSON du rapport des règles mortes.
+pub fn render_dead_rules_json(view: &DeadRulesView) -> String {
+    serde_json::to_string_pretty(view)
+        .unwrap_or_else(|e| format!("{{\"erreur\":\"échec de sérialisation : {e}\"}}"))
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -558,5 +960,248 @@ mod tests {
         let json = render_trace_json(&trace);
         let v: serde_json::Value = serde_json::from_str(&json).unwrap();
         assert_eq!(v["verdict"], "Allowed");
+    }
+
+    // -- Résumé d'un HeaderSet ------------------------------------------
+
+    fn net(s: &str) -> ipnet::IpNet {
+        s.parse().expect("préfixe de test valide")
+    }
+
+    #[test]
+    fn resume_dun_flux_simple() {
+        // L'exemple de l'énoncé : « 10.0.0.0/24 → 10.0.20.5:445/tcp ».
+        let set = HeaderSet::flow(
+            net("10.0.0.0/24"),
+            net("10.0.20.5/32"),
+            6,
+            calque_model::PortRange::single(445),
+        );
+        assert_eq!(
+            format_headerset(&set),
+            vec!["10.0.0.0/24 → 10.0.20.5:445/tcp".to_owned()]
+        );
+    }
+
+    #[test]
+    fn resume_borne_les_paves_et_les_cas_limites() {
+        use calque_space::HeaderSpace;
+        // Vide.
+        assert_eq!(
+            format_headerset(&HeaderSet::empty()),
+            vec!["(ensemble vide)"]
+        );
+        // Plein : tout est « * », le service est « any ».
+        assert_eq!(format_headerset(&HeaderSet::full()), vec!["* → *:any"]);
+        // Plus de MAX_CUBES_SHOWN pavés non fusionnables : l'affichage est
+        // borné avec le décompte du reste.
+        let cubes = (0..(MAX_CUBES_SHOWN as u16 + 3)).map(|i| {
+            Cube::from_flow(
+                net(&format!("10.{i}.0.0/24")),
+                net(&format!("10.20.{i}.5/32")),
+                6,
+                calque_model::PortRange::single(400 + i),
+            )
+        });
+        let set = HeaderSet::from_cubes(cubes);
+        let lines = format_headerset(&set);
+        assert_eq!(lines.len(), MAX_CUBES_SHOWN + 1);
+        assert_eq!(lines.last().unwrap(), "… et 3 autre(s) pavé(s)");
+    }
+
+    #[test]
+    fn resume_dun_pave_avec_port_source_et_plage() {
+        let cube = Cube::new(
+            calque_space::PrefixSet::from_net(net("10.0.0.0/24")),
+            calque_space::PrefixSet::from_net(net("10.0.20.5/32")),
+            ProtoSet::single(17),
+            PortRanges::from_range(calque_model::PortRange {
+                start: 1024,
+                end: 65535,
+            }),
+            PortRanges::from_range(calque_model::PortRange {
+                start: 7000,
+                end: 7010,
+            }),
+        );
+        assert_eq!(
+            format_cube(&cube),
+            "10.0.0.0/24 → 10.0.20.5:7000-7010/udp (port source 1024-65535)"
+        );
+    }
+
+    // -- Rendu d'un rapport reach ---------------------------------------
+
+    fn reach_exemple() -> ReachView {
+        ReachView {
+            question: "Tout ce qui peut atteindre 10.0.20.5:445/tcp".into(),
+            flows: vec![ReachFlowView {
+                entry: "fw-01/lan".into(),
+                set: HeaderSet::flow(
+                    net("10.0.10.0/24"),
+                    net("10.0.20.5/32"),
+                    6,
+                    calque_model::PortRange::single(445),
+                ),
+                sample: ConcretePacket {
+                    src: "10.0.10.0".parse().unwrap(),
+                    dst: "10.0.20.5".parse().unwrap(),
+                    proto: 6,
+                    sport: 0,
+                    dport: 445,
+                },
+                decisions: vec![ReachDecisionView {
+                    device: "fw-01".into(),
+                    decision: DecisionView {
+                        stage: StageView::EgressFilter,
+                        rule: Some("12".into()),
+                        source: Some(SourceSpan::new("fw-01.conf", 120)),
+                        outcome: "accepté".into(),
+                        shadowed_by: vec![],
+                    },
+                }],
+            }],
+            diagnostics: vec![Diagnostic::error(
+                "topologie incomplète : aucun lien depuis fw-01/wan",
+                None,
+            )],
+        }
+    }
+
+    #[test]
+    fn rendu_texte_dun_reach() {
+        let txt = render_reach_text(&reach_exemple());
+        assert!(
+            txt.contains("Tout ce qui peut atteindre 10.0.20.5:445/tcp :"),
+            "{txt}"
+        );
+        assert!(txt.contains("1. entrée fw-01/lan"), "{txt}");
+        assert!(
+            txt.contains("ensemble : 10.0.10.0/24 → 10.0.20.5:445/tcp"),
+            "{txt}"
+        );
+        assert!(
+            txt.contains("exemple  : 10.0.10.0 → 10.0.20.5:445/tcp"),
+            "{txt}"
+        );
+        assert!(
+            txt.contains("autorisé par la règle 12 (fw-01.conf ligne 120)"),
+            "{txt}"
+        );
+        assert!(
+            txt.contains("fw-01 : filtre de sortie : accepté (règle 12, fw-01.conf ligne 120)"),
+            "{txt}"
+        );
+        assert!(txt.contains("1 flux autorisé(s)."), "{txt}");
+        // Les parts non décidables sont affichées honnêtement.
+        assert!(txt.contains("1 part(s) non décidable(s)"), "{txt}");
+        assert!(txt.contains("[erreur] topologie incomplète"), "{txt}");
+    }
+
+    #[test]
+    fn rendu_texte_dun_reach_vide() {
+        let view = ReachView {
+            question: "Tout ce qui peut atteindre 192.0.2.1:22/tcp".into(),
+            flows: vec![],
+            diagnostics: vec![],
+        };
+        let txt = render_reach_text(&view);
+        assert!(txt.contains("Aucun flux autorisé trouvé."), "{txt}");
+        assert!(!txt.contains("part(s) non décidable(s)"), "{txt}");
+    }
+
+    #[test]
+    fn rendu_json_dun_reach() {
+        let json = render_reach_json(&reach_exemple());
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(v["flows"][0]["entry"], "fw-01/lan");
+        assert_eq!(v["flows"][0]["decisions"][0]["decision"]["rule"], "12");
+        assert_eq!(v["diagnostics"].as_array().unwrap().len(), 1);
+    }
+
+    // -- Rendu des règles mortes ----------------------------------------
+
+    fn dead_exemple() -> DeadRulesView {
+        DeadRulesView {
+            devices: 1,
+            rules: vec![
+                DeadRuleView {
+                    device: "fw-01".into(),
+                    policy: "forward".into(),
+                    rule: "20".into(),
+                    source: SourceSpan::new("fw-01.conf", 200),
+                    kind: DeadRuleKindView::Shadowed,
+                    masked_by: vec![MaskerView {
+                        rule: "10".into(),
+                        source: SourceSpan::new("fw-01.conf", 100),
+                    }],
+                    sample: Some(ConcretePacket {
+                        src: "10.0.10.128".parse().unwrap(),
+                        dst: "10.0.20.5".parse().unwrap(),
+                        proto: 6,
+                        sport: 0,
+                        dport: 445,
+                    }),
+                },
+                DeadRuleView {
+                    device: "fw-01".into(),
+                    policy: "forward".into(),
+                    rule: "40".into(),
+                    source: SourceSpan::new("fw-01.conf", 400),
+                    kind: DeadRuleKindView::EmptySet,
+                    masked_by: vec![],
+                    sample: None,
+                },
+            ],
+        }
+    }
+
+    #[test]
+    fn rendu_texte_des_regles_mortes() {
+        let txt = render_dead_rules_text(&dead_exemple());
+        assert!(txt.contains("MASQUÉE"), "{txt}");
+        assert!(
+            txt.contains(
+                "règle 20 (politique forward, équipement « fw-01 ») — fw-01.conf ligne 200"
+            ),
+            "{txt}"
+        );
+        assert!(
+            txt.contains("masquée par : la règle 10 (fw-01.conf ligne 100)"),
+            "{txt}"
+        );
+        assert!(
+            txt.contains("paquet témoin : 10.0.10.128 → 10.0.20.5:445/tcp"),
+            "{txt}"
+        );
+        assert!(txt.contains("ENSEMBLE VIDE"), "{txt}");
+        assert!(txt.contains("ne peut correspondre à aucun paquet"), "{txt}");
+        assert!(
+            txt.contains("1 équipement(s) analysé(s), 2 règle(s) morte(s)."),
+            "{txt}"
+        );
+    }
+
+    #[test]
+    fn rendu_texte_sans_regle_morte() {
+        let view = DeadRulesView {
+            devices: 2,
+            rules: vec![],
+        };
+        let txt = render_dead_rules_text(&view);
+        assert!(txt.contains("Aucune règle morte"), "{txt}");
+        assert!(
+            txt.contains("2 équipement(s) analysé(s), 0 règle(s) morte(s)."),
+            "{txt}"
+        );
+    }
+
+    #[test]
+    fn rendu_json_des_regles_mortes() {
+        let json = render_dead_rules_json(&dead_exemple());
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(v["devices"], 1);
+        assert_eq!(v["rules"][0]["kind"], "Shadowed");
+        assert_eq!(v["rules"][1]["kind"], "EmptySet");
     }
 }

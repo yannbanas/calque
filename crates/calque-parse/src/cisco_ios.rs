@@ -8,7 +8,7 @@
 
 use crate::error::ParseError;
 use crate::tokenize::tokenize;
-use crate::tree::{ConfigNode, ConfigTree};
+use crate::tree::{ConfigNode, ConfigTree, MAX_DEPTH};
 
 /// Analyse une configuration Cisco IOS / IOS-XE.
 pub fn parse(input: &str, filename: &str) -> Result<ConfigTree, ParseError> {
@@ -61,6 +61,16 @@ pub fn parse(input: &str, filename: &str) -> Result<ConfigTree, ParseError> {
         // empile : les lignes suivantes plus indentées deviendront des
         // enfants de ce nœud.
         pop_to(indent, &mut stack, &mut roots);
+        // §11.3 — une indentation hostile strictement croissante ne doit
+        // pas pouvoir construire un arbre arbitrairement profond (la
+        // destruction récursive du `ConfigNode` déborderait la pile).
+        if stack.len() >= MAX_DEPTH {
+            return Err(ParseError::TooDeep {
+                file: filename.to_owned(),
+                line,
+                limit: MAX_DEPTH,
+            });
+        }
         stack.push((indent, node));
         index += 1;
     }
@@ -354,6 +364,35 @@ policy-map PM-WAN
         let tree = parse(input, "t.conf").expect("tolérant");
         let desc = tree.roots[0].child("description").expect("description");
         assert_eq!(desc.args_joined(), "lien principal");
+    }
+
+    /// §11.3 — une indentation strictement croissante (hostile) ne peut
+    /// pas construire un arbre plus profond que la limite de sûreté.
+    #[test]
+    fn indentation_hostile_refusee_a_la_limite() {
+        let mut input = String::new();
+        for depth in 0..=MAX_DEPTH {
+            input.push_str(&" ".repeat(depth));
+            input.push_str("n\n");
+        }
+        let err = parse(&input, "hostile.conf").expect_err("trop profond");
+        assert_eq!(
+            err,
+            ParseError::TooDeep {
+                file: "hostile.conf".to_owned(),
+                line: MAX_DEPTH as u32 + 1,
+                limit: MAX_DEPTH,
+            }
+        );
+
+        // Juste SOUS la limite : accepté.
+        let mut ok = String::new();
+        for depth in 0..MAX_DEPTH {
+            ok.push_str(&" ".repeat(depth));
+            ok.push_str("n\n");
+        }
+        let tree = parse(&ok, "profond.conf").expect("sous la limite");
+        assert_eq!(tree.roots.len(), 1);
     }
 
     #[test]

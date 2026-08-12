@@ -11,11 +11,13 @@ path = "src/main.rs"
 
 [dependencies]
 calque-model = { workspace = true }
+calque-space = { workspace = true }
 calque-policy = { workspace = true }
 calque-report = { workspace = true }
 calque-engine = { workspace = true }
 calque-vendors = { workspace = true }
 calque-diff = { workspace = true }
+calque-scrub = { workspace = true }
 clap = { workspace = true }
 ipnet = { workspace = true }
 miette = { workspace = true }

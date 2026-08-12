@@ -1,0 +1,61 @@
+name: Support d'un nouveau constructeur
+description: Demander la prise en charge d'un format de configuration (pare-feu, routeur).
+title: "[constructeur] "
+labels: ["constructeur"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Le projet suit un principe : **un constructeur parfaitement traité vaut
+        mieux que six approximatifs**. Les constructeurs sont pris dans l'ordre
+        de la feuille de route (FortiGate, Cisco IOS/IOS-XE, pfSense/OPNsense,
+        nftables, puis HPE/Aruba et UniFi) — cette demande sert à mesurer la
+        demande réelle et à rassembler la matière (échantillons, documentation)
+        qui rendra l'implémentation possible.
+
+        **⚠️ Tout échantillon de configuration doit être anonymisé** — jamais de
+        configuration réelle, voir
+        [corpus/README.md](https://github.com/yannbanas/calque/blob/main/corpus/README.md).
+  - type: input
+    id: constructeur
+    attributes:
+      label: Constructeur et gamme
+      placeholder: "pfSense 2.7 / OPNsense 24.x"
+    validations:
+      required: true
+  - type: textarea
+    id: format
+    attributes:
+      label: Format de configuration
+      description: "À quoi ressemble le fichier de configuration : blocs, indentation, XML, JSON ? Un export se fait-il en un seul fichier texte ?"
+    validations:
+      required: true
+  - type: textarea
+    id: echantillon
+    attributes:
+      label: Échantillon ANONYMISÉ
+      description: Un extrait représentatif (interfaces, quelques règles de filtrage, une route), entièrement anonymisé. C'est la contribution qui accélère le plus l'implémentation.
+      render: text
+    validations:
+      required: false
+  - type: textarea
+    id: docs
+    attributes:
+      label: Documentation publique
+      description: Liens vers la documentation publique du format (référence CLI, schéma de configuration, guides du constructeur).
+    validations:
+      required: false
+  - type: textarea
+    id: usage
+    attributes:
+      label: Contexte d'usage
+      description: "Facultatif : ce que vous voudriez vérifier avec calque sur ces équipements (aide à prioriser ce qui doit être supporté en premier dans ce format)."
+    validations:
+      required: false
+  - type: checkboxes
+    id: verifications
+    attributes:
+      label: Vérifications
+      options:
+        - label: "L'échantillon ci-dessus, s'il y en a un, est anonymisé et j'ai le droit de le partager."
+          required: true

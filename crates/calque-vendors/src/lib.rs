@@ -43,9 +43,30 @@
 //! `Err(Vec<Diagnostic>)` reste réservé aux échecs totaux (arbre vide ou
 //! inexploitable) : dans ce cas aucun modèle n'est rendu du tout.
 
+pub mod cisco_ios;
 pub mod fortigate;
 
 use calque_model::{Device, Diagnostic, Fidelity, Vendor};
+
+/// Extrait d'une directive pour un message de diagnostic : le mot-clé et
+/// au plus `keep` arguments, le reste étant remplacé par « … ».
+///
+/// Règle de sûreté (§11.4) : les VALEURS d'une directive non comprise ne
+/// vont jamais dans un diagnostic — une directive inconnue peut porter un
+/// secret (`crypto isakmp key S3CRET …`, `ip ftp password …`,
+/// `ppp chap password …`). Le `SourceSpan` suffit à retrouver la ligne
+/// exacte dans le fichier source.
+pub(crate) fn directive_excerpt(keyword: &str, args: &[String], keep: usize) -> String {
+    let mut out = String::from(keyword);
+    for arg in args.iter().take(keep) {
+        out.push(' ');
+        out.push_str(arg);
+    }
+    if args.len() > keep {
+        out.push_str(" …");
+    }
+    out
+}
 // L'arbre générique de la couche 1 (§6.1), re-exporté pour les
 // consommateurs de ce crate.
 pub use calque_parse::{ConfigNode, ConfigTree};
@@ -123,5 +144,8 @@ pub trait VendorAdapter {
 /// Tous les adaptateurs connus, dans l'ordre de la feuille de route (§6.4).
 /// Sert à la détection automatique.
 pub fn all_adapters() -> Vec<Box<dyn VendorAdapter>> {
-    vec![Box::new(fortigate::FortigateAdapter)]
+    vec![
+        Box::new(fortigate::FortigateAdapter),
+        Box::new(cisco_ios::CiscoIosAdapter),
+    ]
 }

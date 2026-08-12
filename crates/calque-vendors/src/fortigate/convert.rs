@@ -17,7 +17,7 @@ use calque_model::{
 };
 
 use super::values;
-use crate::{AdapterOutput, ConfigNode, ConfigTree};
+use crate::{directive_excerpt, AdapterOutput, ConfigNode, ConfigTree};
 
 /// Distance administrative par défaut d'une route statique FortiGate.
 const DEFAULT_STATIC_DISTANCE: u32 = 10;
@@ -164,11 +164,13 @@ impl Converter {
                         self.device.id = DeviceId::new(name);
                     }
                 }
+                // Message tronqué à dessein : une directive non comprise
+                // peut porter un secret — sa VALEUR ne va jamais dans un
+                // diagnostic (§11.4), le span suffit à retrouver la ligne.
                 _ => self.unsupported(
                     format!(
-                        "`{} {}` non géré dans `config system global`",
-                        d.keyword,
-                        d.args.join(" ")
+                        "`{}` non géré dans `config system global`",
+                        directive_excerpt(&d.keyword, &d.args, 1)
                     ),
                     &d.span,
                 ),
@@ -270,6 +272,18 @@ impl Converter {
                     ),
                 }
             }
+            // FortiOS fusionne un `edit` rouvert sur le même nom ; ici la
+            // seconde définition REMPLACE la première. Fusionner serait
+            // deviner (§6.3) : on remplace ET on dégrade la fidélité.
+            if self.device.interfaces.contains_key(&iface.id) {
+                self.unsupported(
+                    format!(
+                        "interface `{name}` redéfinie : la nouvelle définition remplace \
+                         la première (l'équipement réel les fusionnerait)"
+                    ),
+                    &edit.span,
+                );
+            }
             self.device.interfaces.insert(iface.id.clone(), iface);
         }
     }
@@ -293,9 +307,8 @@ impl Converter {
                     ("set", Some("description" | "comment")) => {}
                     _ => self.unsupported(
                         format!(
-                            "`{} {}` non géré dans la zone `{name}`",
-                            d.keyword,
-                            d.args.join(" ")
+                            "`{}` non géré dans la zone `{name}`",
+                            directive_excerpt(&d.keyword, &d.args, 1)
                         ),
                         &d.span,
                     ),
@@ -310,6 +323,15 @@ impl Converter {
                         &edit.span,
                     ),
                 }
+            }
+            if self.device.zones.contains_key(&zone_id) {
+                self.unsupported(
+                    format!(
+                        "zone `{name}` redéfinie : la nouvelle liste de membres remplace \
+                         la première"
+                    ),
+                    &edit.span,
+                );
             }
             self.device.zones.insert(zone_id, members);
         }
@@ -557,10 +579,17 @@ impl Converter {
                     }
                 }
             };
-            self.device
-                .objects
-                .addresses
-                .insert(ObjectId::new(name), object);
+            let oid = ObjectId::new(name.as_str());
+            if self.device.objects.addresses.contains_key(&oid) {
+                self.unsupported(
+                    format!(
+                        "objet adresse `{name}` redéfini : la nouvelle définition \
+                         remplace la première"
+                    ),
+                    &edit.span,
+                );
+            }
+            self.device.objects.addresses.insert(oid, object);
         }
     }
 
@@ -580,9 +609,8 @@ impl Converter {
                     ("set", Some("comment" | "color" | "uuid")) => {}
                     _ => self.unsupported(
                         format!(
-                            "`{} {}` non géré dans le groupe d'adresses `{name}`",
-                            d.keyword,
-                            d.args.join(" ")
+                            "`{}` non géré dans le groupe d'adresses `{name}`",
+                            directive_excerpt(&d.keyword, &d.args, 1)
                         ),
                         &d.span,
                     ),
@@ -598,10 +626,20 @@ impl Converter {
                     );
                 }
             }
+            let oid = ObjectId::new(name.as_str());
+            if self.device.objects.addresses.contains_key(&oid) {
+                self.unsupported(
+                    format!(
+                        "groupe d'adresses `{name}` redéfini (ou en collision avec un \
+                         objet adresse) : la nouvelle définition remplace la première"
+                    ),
+                    &edit.span,
+                );
+            }
             self.device
                 .objects
                 .addresses
-                .insert(ObjectId::new(name), AddrObject::Group(members));
+                .insert(oid, AddrObject::Group(members));
         }
     }
 
@@ -734,10 +772,20 @@ impl Converter {
                 );
                 continue;
             }
+            let oid = ObjectId::new(name.as_str());
+            if self.device.objects.services.contains_key(&oid) {
+                self.unsupported(
+                    format!(
+                        "service `{name}` redéfini : la nouvelle définition remplace \
+                         la première"
+                    ),
+                    &edit.span,
+                );
+            }
             self.device
                 .objects
                 .services
-                .insert(ObjectId::new(name), ServiceObject::Services(services));
+                .insert(oid, ServiceObject::Services(services));
         }
     }
 
@@ -757,9 +805,8 @@ impl Converter {
                     ("set", Some("comment" | "color")) => {}
                     _ => self.unsupported(
                         format!(
-                            "`{} {}` non géré dans le groupe de services `{name}`",
-                            d.keyword,
-                            d.args.join(" ")
+                            "`{}` non géré dans le groupe de services `{name}`",
+                            directive_excerpt(&d.keyword, &d.args, 1)
                         ),
                         &d.span,
                     ),
@@ -775,10 +822,20 @@ impl Converter {
                     );
                 }
             }
+            let oid = ObjectId::new(name.as_str());
+            if self.device.objects.services.contains_key(&oid) {
+                self.unsupported(
+                    format!(
+                        "groupe de services `{name}` redéfini (ou en collision avec un \
+                         service) : la nouvelle définition remplace la première"
+                    ),
+                    &edit.span,
+                );
+            }
             self.device
                 .objects
                 .services
-                .insert(ObjectId::new(name), ServiceObject::Group(members));
+                .insert(oid, ServiceObject::Group(members));
         }
     }
 
@@ -908,15 +965,21 @@ impl Converter {
         }
 
         let pid = PolicyId::new(FORWARD_POLICY);
-        self.device.policies.insert(
-            pid.clone(),
-            Policy {
+        // Plusieurs blocs `config firewall policy` (fichier concaténé,
+        // entrée hostile) : les règles s'AJOUTENT dans l'ordre du fichier.
+        // Remplacer la table ferait disparaître en silence les règles du
+        // premier bloc — un refus effacé rendrait un verdict optimiste.
+        let policy = self
+            .device
+            .policies
+            .entry(pid.clone())
+            .or_insert_with(|| Policy {
                 id: pid.clone(),
-                rules,
+                rules: Vec::new(),
                 // Tout ce qu'aucune politique n'accepte est refusé.
                 default_action: Action::Deny,
-            },
-        );
+            });
+        policy.rules.extend(rules);
         // Filtrage forward, décidé à l'entrée (voir l'en-tête de mod.rs).
         if !self.device.pipeline.ingress.contains(&pid) {
             self.device.pipeline.ingress.push(pid);
@@ -1062,6 +1125,7 @@ fn file_stem(path: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::fortigate::FortigateAdapter;
 
     #[test]
     fn nom_de_fichier_vers_identifiant() {
@@ -1070,5 +1134,98 @@ mod tests {
         assert_eq!(file_stem("fw-01"), "fw-01");
         assert_eq!(file_stem(".conf"), ".conf");
         assert_eq!(file_stem(""), "equipement");
+    }
+
+    fn import(raw: &str) -> AdapterOutput {
+        FortigateAdapter
+            .import_str(raw, "t.conf")
+            .expect("un modèle doit sortir")
+    }
+
+    fn all_messages(out: &AdapterOutput) -> Vec<&str> {
+        let mut msgs: Vec<&str> = out.notes.iter().map(|d| d.message.as_str()).collect();
+        if let Fidelity::Partial { unsupported } = &out.fidelity {
+            msgs.extend(unsupported.iter().map(|d| d.message.as_str()));
+        }
+        msgs
+    }
+
+    /// §11.4 — la VALEUR d'une directive non comprise ne fuit jamais dans
+    /// un diagnostic : elle peut porter un secret.
+    #[test]
+    fn secrets_absents_des_diagnostics() {
+        let out = import(
+            "config system global\n    set hostname fw-t\n    \
+             set directive-inconnue S3CRET-VALEUR\nend\n",
+        );
+        let msgs = all_messages(&out);
+        assert!(
+            msgs.iter().any(|m| m.contains("directive-inconnue")),
+            "la directive est diagnostiquée par son NOM : {msgs:?}"
+        );
+        assert!(
+            msgs.iter().all(|m| !m.contains("S3CRET")),
+            "la valeur ne doit jamais apparaître : {msgs:?}"
+        );
+    }
+
+    /// Deux blocs `config firewall policy` : les règles s'AJOUTENT dans
+    /// l'ordre du fichier. Écraser le premier bloc effacerait ses refus
+    /// et rendrait des verdicts optimistes.
+    #[test]
+    fn blocs_de_politiques_multiples_concatenes() {
+        let out = import(
+            "config firewall policy\n    edit 1\n        set action deny\n    next\nend\n\
+             config firewall policy\n    edit 2\n        set action accept\n    next\nend\n",
+        );
+        let policy = out
+            .device
+            .policies
+            .get(&PolicyId::new(FORWARD_POLICY))
+            .expect("politique forward");
+        let ids: Vec<&str> = policy.rules.iter().map(|r| r.id.as_str()).collect();
+        assert_eq!(ids, ["1", "2"], "ordre du fichier préservé");
+        assert_eq!(policy.rules[0].action, Action::Deny);
+        assert_eq!(policy.rules[1].action, Action::Accept);
+        // Le pipeline ne référence la politique qu'une seule fois.
+        assert_eq!(out.device.pipeline.ingress.len(), 1);
+    }
+
+    /// Une interface redéfinie est REMPLACÉE (jamais fusionnée en
+    /// silence) et la fidélité est dégradée : pas de verdict ferme sur un
+    /// modèle qui diverge de l'équipement réel.
+    #[test]
+    fn interface_redefinie_degrade_la_fidelite() {
+        let out = import(
+            "config system interface\n    edit \"port1\"\n        \
+             set ip 10.0.0.1 255.255.255.0\n    next\n    edit \"port1\"\n        \
+             set vlanid 10\n    next\nend\n",
+        );
+        let Fidelity::Partial { unsupported } = &out.fidelity else {
+            panic!("la redéfinition doit dégrader la fidélité");
+        };
+        assert!(
+            unsupported
+                .iter()
+                .any(|d| d.message.contains("port1") && d.message.contains("redéfinie")),
+            "{unsupported:?}"
+        );
+    }
+
+    /// Un objet adresse redéfini est diagnostiqué (même classe de risque :
+    /// un refus qui visait l'ancienne définition change de portée).
+    #[test]
+    fn objet_adresse_redefini_diagnostique() {
+        let out = import(
+            "config firewall address\n    edit \"SRV\"\n        \
+             set subnet 10.0.20.5 255.255.255.255\n    next\n    edit \"SRV\"\n        \
+             set subnet 10.0.99.0 255.255.255.0\n    next\nend\n",
+        );
+        let Fidelity::Partial { unsupported } = &out.fidelity else {
+            panic!("la redéfinition doit dégrader la fidélité");
+        };
+        assert!(unsupported
+            .iter()
+            .any(|d| d.message.contains("SRV") && d.message.contains("redéfini")));
     }
 }

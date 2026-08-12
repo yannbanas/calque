@@ -5,9 +5,12 @@
 
 use std::path::Path;
 
-use calque_engine::{Outcome, Stage, Trace, Verdict};
+use calque_engine::{DeadRule, DeadRuleKind, Outcome, ReachReport, Stage, Trace, Verdict};
 use calque_model::{ConcretePacket, Device, DeviceId, Diagnostic, Fidelity, Network, Vendor};
-use calque_report::{DecisionView, HopView, StageView, TraceView, VerdictView};
+use calque_report::{
+    DeadRuleKindView, DeadRuleView, DeadRulesView, DecisionView, HopView, MaskerView,
+    ReachDecisionView, ReachFlowView, ReachView, StageView, TraceView, VerdictView,
+};
 use calque_vendors::fortigate::FortigateAdapter;
 use calque_vendors::{all_adapters, Confidence};
 use miette::{miette, IntoDiagnostic, WrapErr};
@@ -18,6 +21,69 @@ use miette::{miette, IntoDiagnostic, WrapErr};
 /// Le mode symbolique couvrira tout l'intervalle ; en mode concret, un
 /// paquet précis suffit et ce choix est affiché tel quel dans la trace.
 pub const EPHEMERAL_SPORT: u16 = 40000;
+
+// ---------------------------------------------------------------------------
+// Bornes de lecture (audit 2026-08-12, finding R1)
+// ---------------------------------------------------------------------------
+
+/// Taille maximale d'un fichier YAML lu par le CLI (`flows.yaml`,
+/// `topology.yaml`) : 4 Mo — plusieurs milliers de fois un fichier de flux
+/// légitime (quelques Ko).
+///
+/// Pourquoi cette borne suffit contre une « bombe YAML » (R1) :
+/// `serde_yaml` 0.9.34 embarque déjà deux gardes internes, non
+/// configurables mais vérifiées dans sa source : une limite de répétition
+/// d'aliases (au plus 100 sauts d'alias par événement du document,
+/// `RepetitionLimitExceeded`) et une limite de profondeur de récursion
+/// (128, `RecursionLimitExceeded`). L'expansion exponentielle « billion
+/// laughs » est donc coupée par le parseur lui-même ; le coût résiduel au
+/// pire est proportionnel à `100 × nombre d'événements`, et le nombre
+/// d'événements est proportionnel à la taille du fichier. Borner la taille
+/// borne donc le travail total. La désérialisation est par ailleurs TYPÉE
+/// (`deny_unknown_fields`, aucune `serde_yaml::Value` générique) : rien ne
+/// matérialise un arbre arbitraire en mémoire.
+pub const MAX_YAML_BYTES: u64 = 4 * 1024 * 1024;
+
+/// Taille maximale d'une configuration importée (`import`, la candidate de
+/// `plan`, `scrub`) : 64 Mo — très au-delà des plus grosses configurations
+/// réelles (quelques Mo pour un pare-feu chargé). Les parseurs sont
+/// linéaires et bornés en profondeur (`MAX_DEPTH`, audit F4), mais lire le
+/// fichier en mémoire reste proportionnel à sa taille : cette borne
+/// plafonne ce coût-là face à un fichier hostile démesuré.
+pub const MAX_CONFIG_BYTES: u64 = 64 * 1024 * 1024;
+
+/// Lit un fichier texte en refusant proprement les fichiers trop gros
+/// (borne documentée ci-dessus) et les contenus non UTF-8 — jamais de
+/// panique, des erreurs miette claires (§11.3 : entrées hostiles).
+///
+/// `kind` complète le message : « un fichier de flux », « une
+/// configuration »…
+pub fn read_bounded(path: &Path, limit: u64, kind: &str) -> miette::Result<String> {
+    let meta = std::fs::metadata(path)
+        .into_diagnostic()
+        .wrap_err_with(|| format!("lecture de {} impossible", path.display()))?;
+    if meta.len() > limit {
+        return Err(miette!(
+            help = "cette borne protège contre les fichiers hostiles ou corrompus (déni de \
+                    service — audit R1) ; un fichier légitime de ce type reste très en deçà",
+            "{} fait {} octets : au-delà de la limite de {} Mo pour {kind}",
+            path.display(),
+            meta.len(),
+            limit / (1024 * 1024)
+        ));
+    }
+    let bytes = std::fs::read(path)
+        .into_diagnostic()
+        .wrap_err_with(|| format!("lecture de {} impossible", path.display()))?;
+    String::from_utf8(bytes).map_err(|_| {
+        miette!(
+            help = "Calque ne lit que des fichiers texte encodés en UTF-8 ; vérifiez \
+                    l'encodage de l'export (ou qu'il ne s'agit pas d'un binaire)",
+            "{} n'est pas un fichier texte UTF-8 valide",
+            path.display()
+        )
+    })
+}
 
 /// Ce qu'un import réussi produit : un équipement, sa fidélité (§6.3) et
 /// les notes informatives de l'adaptateur (constats, pas des lacunes).
@@ -47,9 +113,7 @@ pub fn vendor_label(v: Vendor) -> &'static str {
 /// Sous le seuil, ou à égalité entre plusieurs constructeurs : erreur
 /// claire listant les scores — jamais de supposition (§6.3).
 pub fn import_config(path: &Path, name: Option<&str>) -> miette::Result<ImportOutcome> {
-    let raw = std::fs::read_to_string(path)
-        .into_diagnostic()
-        .wrap_err_with(|| format!("lecture de {} impossible", path.display()))?;
+    let raw = read_bounded(path, MAX_CONFIG_BYTES, "une configuration")?;
     // Le libellé de fichier porté par tous les SourceSpan du modèle : le
     // chemin tel que donné, pour que `model check` puisse relire la source.
     let label = path.display().to_string();
@@ -192,20 +256,95 @@ pub fn trace_to_view(trace: &Trace) -> TraceView {
                 out_iface: h.out_iface.as_ref().map(|i| i.to_string()),
                 header_in: Some(h.header_in),
                 header_out: Some(h.header_out),
-                decisions: h
+                decisions: h.decisions.iter().map(decision_view).collect(),
+            })
+            .collect(),
+    }
+}
+
+/// Adapte une décision du moteur vers la vue rendue par `calque-report`
+/// (partagée entre la trace concrète et les rapports symboliques).
+pub fn decision_view(d: &calque_engine::Decision) -> DecisionView {
+    DecisionView {
+        stage: stage_view(d.stage),
+        rule: d.rule.as_ref().map(|r| r.to_string()),
+        source: d.source.clone(),
+        outcome: outcome_label(d.outcome).to_owned(),
+        shadowed_by: d.shadowed_by.iter().map(|r| r.to_string()).collect(),
+    }
+}
+
+/// Adapte un rapport symbolique `reach` vers la vue rendue par
+/// `calque-report`. La `question` est le libellé déjà construit
+/// (« Tout ce qui peut atteindre 10.0.20.5:445/tcp »).
+pub fn reach_to_view(report: &ReachReport, question: String) -> ReachView {
+    ReachView {
+        question,
+        flows: report
+            .flows
+            .iter()
+            .map(|f| ReachFlowView {
+                entry: format!("{}/{}", f.entry.device, f.entry.iface),
+                set: f.set.clone(),
+                sample: f.sample,
+                decisions: f
                     .decisions
                     .iter()
-                    .map(|d| DecisionView {
-                        stage: stage_view(d.stage),
-                        rule: d.rule.as_ref().map(|r| r.to_string()),
-                        source: d.source.clone(),
-                        outcome: outcome_label(d.outcome).to_owned(),
-                        shadowed_by: d.shadowed_by.iter().map(|r| r.to_string()).collect(),
+                    .map(|d| ReachDecisionView {
+                        device: d.device.to_string(),
+                        decision: decision_view(&d.decision),
                     })
                     .collect(),
             })
             .collect(),
+        diagnostics: report.diagnostics.clone(),
     }
+}
+
+/// Adapte les règles mortes d'un équipement vers les vues rendues par
+/// `calque-report`.
+pub fn dead_rules_to_views(device: &DeviceId, dead: &[DeadRule]) -> Vec<DeadRuleView> {
+    dead.iter()
+        .map(|d| DeadRuleView {
+            device: device.to_string(),
+            policy: d.policy.to_string(),
+            rule: d.rule.to_string(),
+            source: d.source.clone(),
+            kind: match d.kind {
+                DeadRuleKind::Shadowed => DeadRuleKindView::Shadowed,
+                DeadRuleKind::EmptySet => DeadRuleKindView::EmptySet,
+            },
+            masked_by: d
+                .masked_by
+                .iter()
+                .map(|m| MaskerView {
+                    rule: m.rule.to_string(),
+                    source: m.source.clone(),
+                })
+                .collect(),
+            sample: d.sample,
+        })
+        .collect()
+}
+
+/// Construit la vue complète des règles mortes du modèle (chaque
+/// équipement est analysé indépendamment). Une règle irrésoluble rend une
+/// erreur : jamais un rapport deviné (§6.3).
+pub fn dead_rules_view(network: &Network) -> miette::Result<DeadRulesView> {
+    let mut rules = Vec::new();
+    for device in network.devices.values() {
+        let dead = calque_engine::dead_rules(device).map_err(|e| {
+            miette!(
+                "analyse des règles mortes impossible sur l'équipement « {} » : {e}",
+                device.id
+            )
+        })?;
+        rules.extend(dead_rules_to_views(&device.id, &dead));
+    }
+    Ok(DeadRulesView {
+        devices: network.devices.len(),
+        rules,
+    })
 }
 
 pub fn verdict_view(v: Verdict) -> VerdictView {

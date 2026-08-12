@@ -124,8 +124,29 @@ impl PortRanges {
     }
 
     /// Inclusion ensembliste : `other ⊆ self`.
+    ///
+    /// Test DIRECT, sans allocation : chaque intervalle de `other` doit
+    /// tenir dans UN intervalle de `self`. C'est exact parce que `self`
+    /// est sous forme normalisée (intervalles disjoints ET non adjacents) :
+    /// un intervalle qui s'étendrait sur deux intervalles de `self`
+    /// contiendrait le trou qui les sépare, donc ne serait pas inclus.
     pub fn contains_set(&self, other: &Self) -> bool {
-        other.subtract(self).is_empty()
+        other.ranges.iter().all(|r| {
+            self.ranges
+                .iter()
+                .any(|a| a.start <= r.start && r.end <= a.end)
+        })
+    }
+
+    /// Vrai si les deux ensembles n'ont aucun port en commun. Test direct,
+    /// sans allocation.
+    pub fn is_disjoint(&self, other: &Self) -> bool {
+        self.ranges.iter().all(|a| {
+            other
+                .ranges
+                .iter()
+                .all(|b| a.end < b.start || b.end < a.start)
+        })
     }
 
     pub fn contains_port(&self, port: u16) -> bool {

@@ -215,11 +215,15 @@ Un modèle faux est pire qu'aucun modèle. Quatre niveaux de défense :
 ## État et feuille de route
 
 **v0, en développement actif.** La spécification est stable
-([CALQUE-ARCHITECTURE.md](CALQUE-ARCHITECTURE.md)). Le MVP fonctionne de bout
-en bout sur FortiGate (`import` → `model check` → `path --explain` → `test` →
-`plan` → `topology check`), couvert par des tests de bout en bout sur le
-corpus. Pas encore éprouvé sur des configurations de production — les retours
-de terrain sont bienvenus.
+([CALQUE-ARCHITECTURE.md](CALQUE-ARCHITECTURE.md)). Tout fonctionne de bout
+en bout sur FortiGate et Cisco IOS (`import` → `model check` → `path
+--explain` → `test` → `plan` → `reach` → `model dead-rules` → `topology
+check` → `scrub`), couvert par des tests de bout en bout sur le corpus,
+des propriétés `proptest`, du fuzzing continu et un audit de sécurité
+([docs/audit/](docs/audit/)). Une configuration de 11 000 lignes s'importe
+en quelques millisecondes ([docs/performance.md](docs/performance.md)).
+Pas encore éprouvé sur des configurations de production — les retours de
+terrain sont bienvenus.
 
 | Étape | Contenu | État |
 |---|---|---|
@@ -228,8 +232,9 @@ de terrain sont bienvenus.
 | S3 | `flows.yaml`, `calque test`, sortie JUnit | ✅ |
 | S4 | `calque plan` — la prévisualisation de changement (ouvertures non demandées détectées par sondes, exhaustivité au S6) | ✅ |
 | — | Topologie v1 : inférence par sous-réseau, `topology.yaml`, `topology check` | ✅ |
-| S5 | Deuxième constructeur : Cisco IOS | ⏳ (tokenizer prêt) |
-| S6 | Mode symbolique : `calque reach`, règles mortes et masquées | ⏳ |
+| S5 | Deuxième constructeur : Cisco IOS (interfaces, routes, ACL, object-groups) | ✅ |
+| S6 | Mode symbolique : `calque reach --to/--from`, `calque model dead-rules` | ✅ |
+| — | `calque scrub` — anonymisation cohérente (relations de sous-réseau préservées, secrets caviardés) | ✅ |
 | S7 | Collecte SSH, voisinage LLDP, découverte de topologie | ⏳ |
 
 Constructeurs visés, dans l'ordre : **FortiGate**, Cisco IOS/IOS-XE,
@@ -238,10 +243,11 @@ parfaitement traité vaut mieux que six approximatifs.
 
 ## Contribuer
 
-Les contributions sont bienvenues — en particulier des configurations de test
-**anonymisées** pour le corpus (lire impérativement
-[corpus/README.md](corpus/README.md) : jamais de configuration réelle non
-anonymisée, autorisation écrite obligatoire).
+Les contributions sont bienvenues — lire [CONTRIBUTING.md](CONTRIBUTING.md)
+(construction, tests, règles du projet, processus). En particulier :
+des configurations de test **anonymisées** pour le corpus (lire
+impérativement [corpus/README.md](corpus/README.md) : jamais de
+configuration réelle non anonymisée, autorisation écrite obligatoire).
 
 ```bash
 cargo test --workspace           # tout doit rester vert
@@ -250,7 +256,10 @@ bash scripts/check-purity.sh     # le cœur doit rester pur
 ```
 
 Les décisions d'architecture sont documentées et datées dans
-[docs/adr/](docs/adr/).
+[docs/adr/](docs/adr/). Les interactions suivent le
+[code de conduite](CODE_OF_CONDUCT.md) ; les vulnérabilités — y compris
+un **verdict faux** — se signalent en privé selon [SECURITY.md](SECURITY.md).
+L'état du projet est tenu dans le [CHANGELOG](CHANGELOG.md).
 
 ## Documentation
 

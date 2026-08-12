@@ -12,3 +12,8 @@ thiserror = { workspace = true }
 
 [dev-dependencies]
 insta = { workspace = true }
+criterion = { workspace = true }
+
+[[bench]]
+name = "fortigate_parse"
+harness = false

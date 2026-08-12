@@ -41,3 +41,13 @@ thiserror = "2"
 petgraph = "0.6"
 proptest = "1"
 insta = "1"
+criterion = "0.5"
+
+# Binaire de diffusion : optimisation inter-crates (LTO) et un seul
+# unité de génération de code. Effet mesuré dans docs/performance.md
+# (« thin » retenu ; « fat » n'apportait rien de plus ici).
+# Le profil `bench` hérite de ces réglages.
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = "symbols"

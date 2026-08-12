@@ -1,0 +1,85 @@
+name: Rapport de bug
+description: Un comportement incorrect de calque — verdict douteux, panic, erreur d'analyse.
+title: "[bug] "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Merci de prendre le temps de signaler ce problème.
+
+        **⚠️ Ne collez JAMAIS une configuration réelle non anonymisée** — une
+        configuration de pare-feu contient le plan d'adressage, des noms de
+        serveurs et parfois des secrets. Anonymisez d'abord (voir
+        [corpus/README.md](https://github.com/yannbanas/calque/blob/main/corpus/README.md) ;
+        `calque scrub` aide, la relecture manuelle reste obligatoire).
+
+        Si le problème est une **vulnérabilité** (verdict faux, panic sur entrée
+        hostile), utilisez le [signalement privé](https://github.com/yannbanas/calque/security/advisories/new)
+        plutôt qu'une issue publique — voir SECURITY.md.
+  - type: input
+    id: commande
+    attributes:
+      label: Commande exécutée
+      description: La commande complète, telle que tapée.
+      placeholder: "calque path 10.0.10.5 '->' 10.0.20.10:445/tcp --explain"
+    validations:
+      required: true
+  - type: textarea
+    id: sortie
+    attributes:
+      label: Sortie complète
+      description: La sortie intégrale de la commande, sans coupe, code de sortie compris si vous l'avez.
+      render: shell
+    validations:
+      required: true
+  - type: textarea
+    id: attendu
+    attributes:
+      label: Comportement attendu
+      description: Ce qui aurait dû se produire, et pourquoi (la règle de l'équipement qui devrait décider, si vous la connaissez).
+    validations:
+      required: true
+  - type: input
+    id: constructeur
+    attributes:
+      label: Constructeur et version de l'équipement
+      description: Le constructeur et la version du système dont provient la configuration.
+      placeholder: "FortiGate / FortiOS 7.4.3"
+    validations:
+      required: true
+  - type: textarea
+    id: config
+    attributes:
+      label: Extrait de configuration ANONYMISÉ
+      description: |
+        Le plus petit extrait qui reproduit le problème. **Jamais de configuration
+        réelle** : adresses banalisées (10.0.0.0/8, 192.0.2.0/24…), noms
+        génériques, aucun secret ni commentaire d'origine. `calque scrub` aide à
+        l'anonymisation ; relisez le résultat à la main avant de coller.
+      render: text
+    validations:
+      required: false
+  - type: textarea
+    id: model_check
+    attributes:
+      label: Sortie de `calque model check`
+      description: La fidélité du modèle sur cette configuration (directives non comprises, avec fichier et ligne). Indispensable pour distinguer un bug du moteur d'un trou d'analyse.
+      render: shell
+    validations:
+      required: false
+  - type: input
+    id: version
+    attributes:
+      label: Version de calque
+      description: "`calque --version`, ou le commit si vous compilez depuis les sources."
+      placeholder: "calque 0.1.0 / commit b9f4c53"
+    validations:
+      required: true
+  - type: checkboxes
+    id: verifications
+    attributes:
+      label: Vérifications
+      options:
+        - label: "L'extrait de configuration ci-dessus est anonymisé (aucune adresse réelle, aucun nom réel, aucun secret)."
+          required: true

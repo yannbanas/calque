@@ -35,6 +35,20 @@ pub enum ParseError {
         line: u32,
         delim: String,
     },
+
+    /// Imbrication plus profonde que la limite de sûreté (§11.3 : une
+    /// entrée hostile ne doit pas pouvoir construire un arbre dont la
+    /// profondeur ferait déborder la pile des traitements récursifs en
+    /// aval — destruction, clonage, sérialisation du `ConfigNode`).
+    /// Aucune configuration réelle n'approche cette limite.
+    #[error(
+        "{file}, ligne {line} : imbrication plus profonde que la limite de sûreté ({limit} niveaux)"
+    )]
+    TooDeep {
+        file: String,
+        line: u32,
+        limit: usize,
+    },
 }
 
 impl ParseError {
@@ -45,7 +59,8 @@ impl ParseError {
             | ParseError::OrphanNext { file, .. }
             | ParseError::UnclosedBlock { file, .. }
             | ParseError::UnterminatedQuote { file, .. }
-            | ParseError::UnterminatedBanner { file, .. } => file,
+            | ParseError::UnterminatedBanner { file, .. }
+            | ParseError::TooDeep { file, .. } => file,
         }
     }
 
@@ -56,7 +71,8 @@ impl ParseError {
             | ParseError::OrphanNext { line, .. }
             | ParseError::UnclosedBlock { line, .. }
             | ParseError::UnterminatedQuote { line, .. }
-            | ParseError::UnterminatedBanner { line, .. } => *line,
+            | ParseError::UnterminatedBanner { line, .. }
+            | ParseError::TooDeep { line, .. } => *line,
         }
     }
 }

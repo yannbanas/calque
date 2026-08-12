@@ -12,19 +12,20 @@ use std::net::IpAddr;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-use calque_engine::Trace;
+use calque_engine::{ReachReport, Trace};
 use calque_model::{
     ConcretePacket, DeviceId, Endpoint, Fidelity, IfaceId, Link, LinkOrigin, Network, Severity,
     ZoneId,
 };
-use calque_policy::{EndpointSpec, Expectation, FlowSpec, FlowsFile, PortSpec};
+use calque_policy::{EndpointSpec, Expectation, FlowSpec, FlowsFile, PortSpec, Proto};
 use calque_report::{FlowResult, FlowStatus, VerdictView};
+use calque_space::{Cube, HeaderSet, PortRanges, PrefixSet, ProtoSet};
 use miette::{miette, Context, IntoDiagnostic};
 
 use crate::backend;
 use crate::cli::{
-    Cli, Command, ImportArgs, ModelCommand, OutputFormat, PathArgs, PlanArgs, TestArgs,
-    TopologyCommand,
+    Cli, Command, DataFormat, ImportArgs, ModelCommand, OutputFormat, PathArgs, PlanArgs,
+    ReachArgs, ReachSpec, ScrubArgs, TestArgs, TopologyCommand,
 };
 use crate::project::{self, Project};
 
@@ -40,12 +41,19 @@ pub fn run(cli: Cli) -> miette::Result<ExitCode> {
         Command::Model {
             command: ModelCommand::Check,
         } => model_check(&root),
+        Command::Model {
+            command: ModelCommand::DeadRules { format },
+        } => model_dead_rules(&root, format),
         Command::Path(args) => path(&root, args),
+        Command::Reach(args) => reach(&root, args),
         Command::Test(args) => test(&root, args),
         Command::Plan(args) => plan(&root, args),
         Command::Topology {
             command: TopologyCommand::Check { topology },
         } => topology_check(&root, &topology),
+        // `scrub` est indépendant du projet `.calque/` : il ne lit et
+        // n'écrit que les fichiers désignés par l'utilisateur.
+        Command::Scrub(args) => scrub(args).map(|()| ExitCode::SUCCESS),
     }
 }
 
@@ -328,6 +336,218 @@ fn path(root: &Path, args: PathArgs) -> miette::Result<ExitCode> {
 }
 
 // ---------------------------------------------------------------------------
+// calque reach (mode symbolique, §5.3)
+// ---------------------------------------------------------------------------
+
+/// Résout la partie adresse d'une spec de `reach` en préfixes concrets,
+/// avec un libellé humain. Une zone est résolue comme dans `calque test` :
+/// les sous-réseaux des interfaces membres (ici en entier — le mode
+/// symbolique couvre tout le sous-réseau, pas un hôte représentatif).
+fn resolve_reach_prefixes(
+    network: &Network,
+    spec: &ReachSpec,
+) -> miette::Result<(PrefixSet, String)> {
+    match spec {
+        ReachSpec::Addr { net, .. } => {
+            let label = if net.prefix_len() == net.max_prefix_len() {
+                net.addr().to_string()
+            } else {
+                net.to_string()
+            };
+            Ok((PrefixSet::from_net(*net), label))
+        }
+        ReachSpec::Zone { name, .. } => {
+            let zone = ZoneId::new(name.as_str());
+            let mut hits: Vec<&calque_model::Device> = network
+                .devices
+                .values()
+                .filter(|d| d.zones.contains_key(&zone))
+                .collect();
+            let device = match hits.len() {
+                0 => {
+                    return Err(miette!(
+                        help = "cibles acceptées : une adresse IP, un préfixe CIDR, \
+                                IP:PORT/PROTO, CIDR:PORT/PROTO, ou un nom de zone du modèle",
+                        "« {name} » ne correspond ni à une adresse, ni à un préfixe, \
+                         ni à une zone du modèle"
+                    ))
+                }
+                1 => hits.pop().expect("hits.len() == 1"),
+                _ => {
+                    let list = hits
+                        .iter()
+                        .map(|d| format!("« {} »", d.id))
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    return Err(miette!(
+                        "la zone « {name} » existe sur plusieurs équipements ({list}) : ambigu"
+                    ));
+                }
+            };
+            let members = device.zones.get(&zone).expect("zone présente");
+            let nets: Vec<ipnet::IpNet> = members
+                .iter()
+                .filter_map(|m| device.interfaces.get(m))
+                .flat_map(|i| i.addrs.iter().map(|a| a.trunc()))
+                .collect();
+            if nets.is_empty() {
+                return Err(miette!(
+                    "la zone « {name} » (équipement « {} ») n'a aucun sous-réseau exploitable",
+                    device.id
+                ));
+            }
+            let prefixes = PrefixSet::from_net(nets[0]);
+            let prefixes = nets[1..]
+                .iter()
+                .fold(prefixes, |acc, n| acc.union(&PrefixSet::from_net(*n)));
+            let subnets = prefixes
+                .prefixes()
+                .iter()
+                .map(|p| p.to_string())
+                .collect::<Vec<_>>()
+                .join(", ");
+            Ok((prefixes, format!("la zone « {name} » ({subnets})")))
+        }
+    }
+}
+
+/// Construit le `HeaderSet` de la question : les préfixes sur la dimension
+/// destination (`--to`) ou source (`--from`) ; le port, s'il est donné,
+/// contraint toujours le port de destination et son protocole.
+fn reach_headerset(
+    prefixes: &PrefixSet,
+    port: Option<(u16, Proto)>,
+    constrain_dst: bool,
+) -> HeaderSet {
+    let mut cube = Cube::full();
+    if constrain_dst {
+        cube.dst = prefixes.clone();
+    } else {
+        cube.src = prefixes.clone();
+    }
+    if let Some((port, proto)) = port {
+        cube.proto = ProtoSet::single(proto.number());
+        cube.dport = PortRanges::single(port);
+    }
+    HeaderSet::from_cube(cube)
+}
+
+/// Les équipements touchés par le rapport (points d'entrée et décisions)
+/// dont l'import est partiel : le rapport n'est pas ferme (§6.3).
+fn partial_devices_in_reach(project: &Project, report: &ReachReport) -> Vec<(DeviceId, usize)> {
+    let mut seen = BTreeSet::new();
+    let mut out = Vec::new();
+    let devices = report.flows.iter().flat_map(|f| {
+        std::iter::once(&f.entry.device).chain(f.decisions.iter().map(|d| &d.device))
+    });
+    for device in devices {
+        if !seen.insert(device.clone()) {
+            continue;
+        }
+        if let Fidelity::Partial { unsupported } = project.fidelity_of(device) {
+            out.push((device.clone(), unsupported.len()));
+        }
+    }
+    out
+}
+
+fn reach(root: &Path, args: ReachArgs) -> miette::Result<ExitCode> {
+    let (raw, is_to) = match (&args.to, &args.from) {
+        (Some(t), None) => (t.as_str(), true),
+        (None, Some(f)) => (f.as_str(), false),
+        // clap garantit l'exclusivité et la présence de l'un des deux.
+        _ => return Err(miette!("précisez soit --to CIBLE, soit --from SOURCE")),
+    };
+    let spec = parse_reach_spec_or_help(raw)?;
+    let project = project::load(root)?;
+
+    let (prefixes, mut label) = resolve_reach_prefixes(&project.network, &spec)?;
+    let port = match &spec {
+        ReachSpec::Addr { port, .. } | ReachSpec::Zone { port, .. } => *port,
+    };
+    if let Some((port, proto)) = port {
+        label.push_str(&format!(":{port}/{proto}"));
+    }
+    let set = reach_headerset(&prefixes, port, is_to);
+
+    // Même préparation du modèle que `path`, `test` et `plan`.
+    let prepared = backend::prepare_for_engine(&project.network);
+    let report = if is_to {
+        calque_engine::reach_to(&prepared, &set)
+    } else {
+        calque_engine::reach_from(&prepared, &set)
+    };
+
+    let question = if is_to {
+        format!("Tout ce qui peut atteindre {label}")
+    } else {
+        format!("Tout ce que {label} peut atteindre")
+    };
+    let view = backend::reach_to_view(&report, question);
+    match args.format {
+        DataFormat::Text => print!("{}", calque_report::render_reach_text(&view)),
+        DataFormat::Json => println!("{}", calque_report::render_reach_json(&view)),
+    }
+
+    // §6.3 : parts non décidables, ou modèle partiel sur un équipement
+    // touché → rapport NON FERME, code de sortie dédié.
+    let has_undecidable = report
+        .diagnostics
+        .iter()
+        .any(|d| d.severity == Severity::Error);
+    let partial = partial_devices_in_reach(&project, &report);
+    if has_undecidable || !partial.is_empty() {
+        if args.format == DataFormat::Text {
+            if !partial.is_empty() {
+                let list = partial
+                    .iter()
+                    .map(|(d, n)| format!("« {d} » ({n} directive(s) non comprise(s))"))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                println!(
+                    "\nAttention : le rapport traverse un modèle partiel : {list}.\n\
+                     Lancez `calque model check` pour le détail."
+                );
+            }
+            println!("\nRapport NON FERME (code de sortie {EXIT_NON_FIRM}).");
+        }
+        return Ok(ExitCode::from(EXIT_NON_FIRM));
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
+/// `parse_reach_spec` avec l'aide contextuelle de miette.
+fn parse_reach_spec_or_help(raw: &str) -> miette::Result<ReachSpec> {
+    crate::cli::parse_reach_spec(raw).map_err(|e| {
+        miette!(
+            help = "exemples : calque reach --to 10.0.20.5:445/tcp ; \
+                    calque reach --to 10.0.20.0/24 ; \
+                    calque reach --from vlan-invite",
+            "{e}"
+        )
+    })
+}
+
+// ---------------------------------------------------------------------------
+// calque model dead-rules (S6)
+// ---------------------------------------------------------------------------
+
+fn model_dead_rules(root: &Path, format: DataFormat) -> miette::Result<ExitCode> {
+    let project = project::load(root)?;
+    // L'analyse porte sur les politiques telles qu'importées : la
+    // préparation pour le moteur (déplacement de politiques dans la
+    // séquence) ne change ni les règles ni leur ordre.
+    let view = backend::dead_rules_view(&project.network)?;
+    match format {
+        DataFormat::Text => print!("{}", calque_report::render_dead_rules_text(&view)),
+        DataFormat::Json => println!("{}", calque_report::render_dead_rules_json(&view)),
+    }
+    // Informatif : code de sortie 0, même avec des règles mortes (seule
+    // une erreur d'évaluation — déjà rendue plus haut — fait échouer).
+    Ok(ExitCode::SUCCESS)
+}
+
+// ---------------------------------------------------------------------------
 // calque test
 // ---------------------------------------------------------------------------
 
@@ -361,9 +581,9 @@ fn test(root: &Path, args: TestArgs) -> miette::Result<ExitCode> {
 }
 
 fn load_flows(path: &Path) -> miette::Result<FlowsFile> {
-    let raw = std::fs::read_to_string(path)
-        .into_diagnostic()
-        .wrap_err_with(|| format!("lecture du fichier de flux {} impossible", path.display()))?;
+    // Borne de taille AVANT la désérialisation YAML (audit R1 — bombes
+    // YAML) : la justification est documentée sur `MAX_YAML_BYTES`.
+    let raw = backend::read_bounded(path, backend::MAX_YAML_BYTES, "un fichier de flux")?;
     let flows: FlowsFile = serde_yaml::from_str(&raw).map_err(|e| {
         miette!(
             help = "format attendu (§10.1) : flows: [ {{ name, from, to, port: 445/tcp | any, expect: allow | deny }} ]",
@@ -736,6 +956,149 @@ fn plan_view(report: &calque_diff::PlanReport) -> calque_report::PlanView {
 }
 
 // ---------------------------------------------------------------------------
+// calque scrub (§10, §11.4)
+// ---------------------------------------------------------------------------
+
+/// Le rappel §11.4, imprimé sur stderr à chaque scrub (stderr pour ne pas
+/// polluer une sortie redirigée : `calque scrub fw.conf > fw-anon.conf`).
+const SCRUB_REMINDER: &str = "Rappel (§11.4) : relisez le résultat avant toute diffusion ; \
+     l'anonymisation est structurelle, pas un chiffrement.";
+
+/// La destination d'un fichier anonymisé : le même nom dans `--out-dir`,
+/// sinon `<nom>.anon.<ext>` (ou `<nom>.anon` sans extension) à côté de
+/// l'original.
+fn scrub_out_path(file: &Path, out_dir: Option<&Path>) -> miette::Result<PathBuf> {
+    let name = file
+        .file_name()
+        .ok_or_else(|| miette!("« {} » n'a pas de nom de fichier", file.display()))?;
+    if let Some(dir) = out_dir {
+        return Ok(dir.join(name));
+    }
+    let mut anon = file.file_stem().unwrap_or(name).to_os_string();
+    anon.push(".anon");
+    if let Some(ext) = file.extension() {
+        anon.push(".");
+        anon.push(ext);
+    }
+    Ok(file.with_file_name(anon))
+}
+
+/// Refuse une destination qui écraserait un fichier existant sans
+/// `--force` — et refuse TOUJOURS d'écraser un fichier d'entrée de
+/// l'appel : même avec `--force`, détruire l'original serait absurde.
+fn scrub_check_dest(dest: &Path, inputs: &[PathBuf], force: bool) -> miette::Result<()> {
+    if !dest.exists() {
+        return Ok(());
+    }
+    let dest_canon = std::fs::canonicalize(dest).ok();
+    let ecrase_une_entree = dest_canon.is_some()
+        && inputs
+            .iter()
+            .any(|f| std::fs::canonicalize(f).ok() == dest_canon);
+    if ecrase_une_entree {
+        return Err(miette!(
+            help = "choisissez un autre répertoire de sortie (--out-dir), ou laissez \
+                    `calque scrub` nommer les sorties <nom>.anon.<ext>",
+            "la sortie {} écraserait un fichier d'entrée de cet appel — refusé, même avec --force",
+            dest.display()
+        ));
+    }
+    if !force {
+        return Err(miette!(
+            help = "utilisez --force pour écraser, ou --out-dir pour écrire ailleurs",
+            "{} existe déjà : rien n'a été écrit",
+            dest.display()
+        ));
+    }
+    Ok(())
+}
+
+/// `calque scrub <FICHIER>...` — anonymise un ou plusieurs fichiers avec
+/// le MÊME `Scrubber` : la table de correspondance est partagée, donc un
+/// nom ou une adresse présents dans plusieurs fichiers reçoivent partout
+/// le même remplacement (§11.4). Indépendant du projet `.calque/`.
+fn scrub(args: ScrubArgs) -> miette::Result<()> {
+    let vers_stdout = args.files.len() == 1 && args.out_dir.is_none();
+
+    // 1. Les destinations, vérifiées AVANT toute lecture et toute
+    // écriture : on refuse d'écraser (sauf --force), et on n'écrit rien
+    // du tout si une destination est refusée.
+    let dests: Option<Vec<PathBuf>> = if vers_stdout {
+        None
+    } else {
+        let mut dests = Vec::with_capacity(args.files.len());
+        for file in &args.files {
+            let dest = scrub_out_path(file, args.out_dir.as_deref())?;
+            scrub_check_dest(&dest, &args.files, args.force)?;
+            dests.push(dest);
+        }
+        Some(dests)
+    };
+    if let Some(map) = &args.map {
+        scrub_check_dest(map, &args.files, args.force)?;
+    }
+
+    // 2. Anonymisation, avec un unique Scrubber pour tout l'appel. Tout
+    // est lu et transformé avant la première écriture : une erreur de
+    // lecture (fichier introuvable, non-UTF8, trop gros) ne laisse aucune
+    // sortie partielle.
+    let mut scrubber = calque_scrub::Scrubber::new();
+    let mut sorties: Vec<String> = Vec::with_capacity(args.files.len());
+    for file in &args.files {
+        let brut = backend::read_bounded(file, backend::MAX_CONFIG_BYTES, "une configuration")?;
+        sorties.push(scrubber.scrub(&brut));
+    }
+
+    // 3. Écriture.
+    match &dests {
+        None => {
+            // Un seul fichier, pas de --out-dir : sortie standard, pour
+            // la redirection du §10 (`calque scrub fw-01.conf > …`).
+            print!("{}", sorties[0]);
+        }
+        Some(dests) => {
+            if let Some(dir) = &args.out_dir {
+                std::fs::create_dir_all(dir)
+                    .into_diagnostic()
+                    .wrap_err_with(|| format!("création de {} impossible", dir.display()))?;
+            }
+            for ((file, dest), texte) in args.files.iter().zip(dests).zip(&sorties) {
+                std::fs::write(dest, texte)
+                    .into_diagnostic()
+                    .wrap_err_with(|| format!("écriture de {} impossible", dest.display()))?;
+                println!("{} → {}", file.display(), dest.display());
+            }
+            println!("{} fichier(s) anonymisé(s).", args.files.len());
+        }
+    }
+
+    // 4. La table de correspondance, uniquement sur demande (--map).
+    if let Some(map) = &args.map {
+        let mut contenu = String::from(
+            "# Table de correspondance `calque scrub` — à conserver en lieu sûr, ne jamais publier.\n\
+             # Elle permet de retrouver les originaux : la diffuser annule l'anonymisation.\n\
+             # Une ligne par remplacement : original<TAB>remplacement. Les secrets n'y figurent jamais.\n",
+        );
+        for (original, remplacement) in scrubber.mapping() {
+            contenu.push_str(original);
+            contenu.push('\t');
+            contenu.push_str(remplacement);
+            contenu.push('\n');
+        }
+        std::fs::write(map, contenu)
+            .into_diagnostic()
+            .wrap_err_with(|| format!("écriture de {} impossible", map.display()))?;
+        eprintln!(
+            "Table de correspondance écrite dans {} — à conserver en lieu sûr, ne jamais publier.",
+            map.display()
+        );
+    }
+
+    eprintln!("{SCRUB_REMINDER}");
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
 // calque topology check (§7)
 // ---------------------------------------------------------------------------
 
@@ -773,9 +1136,13 @@ fn topology_check(root: &Path, topology_file: &Path) -> miette::Result<ExitCode>
 
     // topology.yaml optionnel : les liens y sont fusionnés comme Declared.
     if topology_file.exists() {
-        let raw = std::fs::read_to_string(topology_file)
-            .into_diagnostic()
-            .wrap_err_with(|| format!("lecture de {} impossible", topology_file.display()))?;
+        // Même garde que `load_flows` (audit R1) : borne de taille avant
+        // toute désérialisation YAML.
+        let raw = backend::read_bounded(
+            topology_file,
+            backend::MAX_YAML_BYTES,
+            "un fichier de topologie",
+        )?;
         let topo: TopoFile = serde_yaml::from_str(&raw).map_err(|e| {
             miette!(
                 help = "format attendu : links: [ {{ a: {{ device, iface }}, b: {{ device, iface }} }} ]",

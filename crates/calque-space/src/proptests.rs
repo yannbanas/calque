@@ -283,6 +283,37 @@ proptest! {
         prop_assert_eq!(a.subtract(&b).union(&a.intersect(&b)), a.clone());
     }
 
+    // --- Chemins directs contre définitions par soustraction ----------------
+    // Les implémentations optimisées (inclusion et disjonction sans
+    // allocation) doivent coïncider avec la définition ensembliste.
+
+    #[test]
+    fn contains_set_prefixes_coincide_avec_la_soustraction(
+        a in arb_prefix_set(),
+        b in arb_prefix_set(),
+    ) {
+        prop_assert_eq!(a.contains_set(&b), b.subtract(&a).is_empty());
+    }
+
+    #[test]
+    fn contains_set_ports_coincide_avec_la_soustraction(
+        a in arb_port_ranges(),
+        b in arb_port_ranges(),
+    ) {
+        prop_assert_eq!(a.contains_set(&b), b.subtract(&a).is_empty());
+    }
+
+    #[test]
+    fn is_disjoint_coincide_avec_l_intersection(a: HeaderSet, b: HeaderSet) {
+        prop_assert_eq!(a.is_disjoint(&b), a.intersect(&b).is_empty());
+        prop_assert_eq!(a.is_disjoint(&b), b.is_disjoint(&a));
+    }
+
+    #[test]
+    fn contains_set_headerset_coincide_avec_la_soustraction(a: HeaderSet, b: HeaderSet) {
+        prop_assert_eq!(a.contains_set(&b), b.subtract(&a).is_empty());
+    }
+
     #[test]
     fn soustraction_de_cube_exacte(a: Cube, b: Cube) {
         // a \ b + (a ∩ b) recouvre exactement a, en pavés disjoints de b.

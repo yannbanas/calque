@@ -1,0 +1,60 @@
+# Fuzzing des analyseurs (§11.3) : les configurations sont des entrées
+# non fiables, potentiellement issues d'un équipement compromis. Tout
+# panic, débordement ou blocage est un bug, même sur entrée absurde.
+name: fuzz
+
+on:
+  schedule:
+    # Chaque lundi à 04h17 UTC (heure décalée pour éviter les pics).
+    - cron: "17 4 * * 1"
+  workflow_dispatch:
+  push:
+    paths:
+      - "crates/calque-parse/**"
+      - "crates/calque-vendors/**"
+      - "fuzz/**"
+      - ".github/workflows/fuzz.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  fuzz:
+    name: cargo fuzz (${{ matrix.cible }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        cible: [parse_fortigate, parse_cisco_ios, import_fortigate]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Toolchain nightly
+        uses: dtolnay/rust-toolchain@nightly
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/cargo-fuzz
+            ~/.cargo/registry
+            fuzz/target
+          key: fuzz-${{ runner.os }}-${{ hashFiles('fuzz/Cargo.lock') }}
+          restore-keys: fuzz-${{ runner.os }}-
+
+      - name: Installer cargo-fuzz
+        run: which cargo-fuzz || cargo install cargo-fuzz --locked
+
+      - name: Fuzzer ${{ matrix.cible }}
+        run: cargo fuzz run ${{ matrix.cible }} -- -max_total_time=120 -timeout=10
+
+      # En cas de crash, libFuzzer écrit l'entrée fautive dans
+      # fuzz/artifacts/<cible>/ : on la publie pour reproduction locale
+      # (`cargo fuzz run <cible> fuzz/artifacts/<cible>/crash-…`).
+      - name: Publier les artefacts de crash
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: artefacts-fuzz-${{ matrix.cible }}
+          path: fuzz/artifacts/
+          if-no-files-found: ignore

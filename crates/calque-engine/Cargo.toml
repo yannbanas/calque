@@ -5,9 +5,17 @@ edition.workspace = true
 license.workspace = true
 publish = false
 
-# Mode concret uniquement pour l'instant : pas de dépendance à calque-space
-# (implémenté en parallèle). Le mode symbolique (§5.3) la réintroduira.
+# Cœur PUR (§1) : calque-model, calque-space et rien d'impur.
+# calque-space porte l'algèbre de pavés du mode symbolique (§5.3).
 [dependencies]
 calque-model = { workspace = true }
+calque-space = { workspace = true }
 ipnet = { workspace = true }
 serde = { workspace = true }
+
+[dev-dependencies]
+criterion = { workspace = true }
+
+[[bench]]
+name = "moteur"
+harness = false

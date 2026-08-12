@@ -260,8 +260,31 @@ impl PrefixSet {
     }
 
     /// Inclusion ensembliste : `other ⊆ self`.
+    ///
+    /// Test DIRECT, sans allocation : chaque préfixe de `other` doit être
+    /// contenu dans UN préfixe de `self`. C'est exact parce que `self` est
+    /// sous forme normalisée : si un préfixe aligné `b` était couvert par
+    /// PLUSIEURS membres de `self` (nécessairement des sous-préfixes
+    /// stricts de `b` le partitionnant), l'agrégation des frères aurait
+    /// fusionné ces membres jusqu'à `b` lui-même — contradiction avec le
+    /// point fixe de la normalisation.
     pub fn contains_set(&self, other: &Self) -> bool {
-        other.subtract(self).is_empty()
+        other
+            .prefixes
+            .iter()
+            .all(|b| self.prefixes.iter().any(|a| net_contains(a, b)))
+    }
+
+    /// Vrai si les deux ensembles n'ont aucune adresse en commun. Deux
+    /// préfixes se chevauchent si et seulement si l'un contient l'autre
+    /// (structure laminaire) : test direct, sans allocation.
+    pub fn is_disjoint(&self, other: &Self) -> bool {
+        self.prefixes.iter().all(|a| {
+            other
+                .prefixes
+                .iter()
+                .all(|b| !net_contains(a, b) && !net_contains(b, a))
+        })
     }
 
     pub fn contains_ip(&self, ip: &IpAddr) -> bool {

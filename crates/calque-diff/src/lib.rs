@@ -92,18 +92,37 @@ where
 }
 
 /// Différence de deux séquences vues comme des MULTI-ensembles :
-/// renvoie `(ajoutés, retirés)`. Chaque occurrence compte une fois.
-fn diff_multiset<T: Eq + Clone>(before: &[T], after: &[T]) -> (Vec<T>, Vec<T>) {
-    let mut pool: Vec<&T> = after.iter().collect();
+/// renvoie `(ajoutés, retirés)`. Chaque occurrence compte une fois, et
+/// l'ordre d'origine est préservé dans les deux sorties.
+///
+/// Décompte via `BTreeMap` : O(n log n). L'ancienne version appariait par
+/// balayage linéaire avec `Vec::remove` — quadratique, donc un déni de
+/// service sur un modèle hostile aux dizaines de milliers de routes
+/// (§11.3 : `calque plan` rejoue des configurations non fiables).
+fn diff_multiset<T: Ord + Clone>(before: &[T], after: &[T]) -> (Vec<T>, Vec<T>) {
+    let mut surplus: BTreeMap<&T, usize> = BTreeMap::new();
+    for a in after {
+        *surplus.entry(a).or_default() += 1;
+    }
     let mut removed = Vec::new();
     for b in before {
-        if let Some(pos) = pool.iter().position(|a| *a == b) {
-            pool.remove(pos);
-        } else {
-            removed.push(b.clone());
+        match surplus.get_mut(b) {
+            Some(n) if *n > 0 => *n -= 1,
+            _ => removed.push(b.clone()),
         }
     }
-    let added = pool.into_iter().cloned().collect();
+    // Ce qui reste en surplus côté `after` a été ajouté ; les occurrences
+    // d'un même élément étant indiscernables, consommer les premières
+    // rencontrées préserve un ordre déterministe.
+    let mut added = Vec::new();
+    for a in after {
+        if let Some(n) = surplus.get_mut(a) {
+            if *n > 0 {
+                *n -= 1;
+                added.push(a.clone());
+            }
+        }
+    }
     (added, removed)
 }
 

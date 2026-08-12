@@ -67,6 +67,11 @@ pub const MAX_PROBES_PER_RULE: usize = 8;
 /// Nombre d'hôtes candidats parcourus dans un sous-réseau pour éviter les
 /// adresses portées par un équipement.
 const MAX_HOST_SCAN: u32 = 8;
+/// Profondeur maximale de résolution des groupes imbriqués pendant la
+/// génération de sondes. La détection de cycle ne suffit pas : une CHAÎNE
+/// de groupes distincts (hostile) serait parcourue récursivement jusqu'au
+/// débordement de pile. Les groupes réels s'imbriquent sur 2 ou 3 niveaux.
+const MAX_GROUP_DEPTH: usize = 32;
 
 /// Port source représentatif quand la plage source est `Any`.
 const REPR_SPORT: u16 = 40000;
@@ -517,20 +522,26 @@ fn owned_addresses(networks: &[&Network]) -> BTreeSet<IpAddr> {
 /// d'interface des deux modèles, borné à [`MAX_UNIVERSE`] sous-réseaux
 /// (parcours trié et déterministe, premiers sous-réseaux retenus).
 fn universe_hosts(networks: &[&Network], avoid: &BTreeSet<IpAddr>) -> Vec<IpAddr> {
+    // Arrêt dès que la borne est atteinte : continuer à dédupliquer sur un
+    // modèle hostile aux dizaines de milliers d'interfaces serait
+    // quadratique pour un résultat identique (seuls les MAX_UNIVERSE
+    // premiers sous-réseaux distincts sont retenus, parcours trié).
     let mut nets: Vec<IpNet> = Vec::new();
-    for network in networks {
+    'collect: for network in networks {
         for device in network.devices.values() {
             for iface in device.interfaces.values() {
                 for addr in &iface.addrs {
                     let net = addr.trunc();
                     if !nets.contains(&net) {
                         nets.push(net);
+                        if nets.len() >= MAX_UNIVERSE {
+                            break 'collect;
+                        }
                     }
                 }
             }
         }
     }
-    nets.truncate(MAX_UNIVERSE);
     let mut hosts: Vec<IpAddr> = Vec::new();
     for net in &nets {
         let host = probe_host(net, avoid);
@@ -644,7 +655,9 @@ fn addr_object_nets(
     out: &mut Vec<IpNet>,
     stack: &mut Vec<ObjectId>,
 ) {
-    if out.len() >= MAX_ADDRS_PER_SIDE || stack.contains(id) {
+    // `stack.len()` borne la PROFONDEUR (une chaîne hostile de groupes
+    // distincts ferait déborder la pile), `stack.contains` casse les cycles.
+    if out.len() >= MAX_ADDRS_PER_SIDE || stack.len() >= MAX_GROUP_DEPTH || stack.contains(id) {
         return;
     }
     match store.addresses.get(id) {
@@ -713,7 +726,8 @@ fn service_object_services(
     out: &mut Vec<Service>,
     stack: &mut Vec<ObjectId>,
 ) {
-    if out.len() >= MAX_SERVICES_PER_RULE || stack.contains(id) {
+    // Même garde de profondeur que `addr_object_nets`.
+    if out.len() >= MAX_SERVICES_PER_RULE || stack.len() >= MAX_GROUP_DEPTH || stack.contains(id) {
         return;
     }
     match store.services.get(id) {
@@ -1124,6 +1138,43 @@ mod tests {
         assert!(probes.len() <= PROBE_BUDGET, "{} sondes", probes.len());
         let unique: HashSet<_> = probes.iter().copied().collect();
         assert_eq!(unique.len(), probes.len(), "sondes dupliquées");
+    }
+
+    // Une chaîne HOSTILE de groupes imbriqués (10 000 niveaux, sans cycle)
+    // ne fait pas déborder la pile pendant la génération de sondes : la
+    // profondeur de résolution est bornée.
+    #[test]
+    fn chaine_de_groupes_hostile_bornee() {
+        use calque_model::AddrObject;
+
+        let mut network = reseau(vec![rule(
+            "1",
+            vec![AddrExpr::Object(ObjectId::new("g0"))],
+            vec![AddrExpr::Net(net("10.0.20.0/24"))],
+            vec![],
+            Action::Accept,
+            10,
+        )]);
+        let fw = network
+            .devices
+            .get_mut(&DeviceId::new("fw-01"))
+            .expect("fw-01");
+        let depth = 10_000;
+        for i in 0..depth {
+            fw.objects.addresses.insert(
+                ObjectId::new(format!("g{i}")),
+                AddrObject::Group(vec![ObjectId::new(format!("g{}", i + 1))]),
+            );
+        }
+        fw.objects.addresses.insert(
+            ObjectId::new(format!("g{depth}")),
+            AddrObject::Nets(vec![net("10.0.30.0/24")]),
+        );
+
+        // Ni panique ni débordement : le rapport sort (meilleure-effort,
+        // le moteur diagnostiquera l'objet à l'évaluation si besoin).
+        let report = plan(&network, &network.clone(), &[]);
+        assert!(report.new_flows.is_empty(), "modèles identiques");
     }
 
     // Le représentant d'un service : protocole de la règle, premier port

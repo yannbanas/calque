@@ -1,0 +1,8 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Vulnérabilité de sécurité (verdict faux, panic sur entrée hostile)
+    url: https://github.com/yannbanas/calque/security/advisories/new
+    about: Signalement privé — ne pas ouvrir d'issue publique. Voir SECURITY.md pour le périmètre.
+  - name: Questions et discussions
+    url: https://github.com/yannbanas/calque/discussions
+    about: Pour les questions d'usage, les idées encore floues et les retours de terrain — avant d'ouvrir une issue.

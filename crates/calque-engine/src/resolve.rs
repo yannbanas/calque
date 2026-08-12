@@ -15,6 +15,24 @@ use calque_model::{
 
 use crate::error::EvalError;
 
+/// Profondeur maximale d'une chaîne de groupes imbriqués (audit
+/// 2026-08-12, R2). La détection de cycle interdit de revisiter un objet,
+/// mais une chaîne de groupes tous DISTINCTS récurse d'un niveau par
+/// groupe : sans borne, une configuration hostile ferait déborder la pile
+/// sur le chemin qui décide du verdict. 64 dépasse largement tout usage
+/// légitime (FortiOS s'arrête bien avant).
+pub(crate) const MAX_GROUP_DEPTH: usize = 64;
+
+pub(crate) fn check_group_depth(stack: &[ObjectId], id: &ObjectId) -> Result<(), EvalError> {
+    if stack.len() >= MAX_GROUP_DEPTH {
+        return Err(EvalError::GroupTooDeep {
+            object: id.clone(),
+            depth: MAX_GROUP_DEPTH,
+        });
+    }
+    Ok(())
+}
+
 /// Le paquet appartient-il au pavé syntaxique de la règle ?
 ///
 /// Convention de `calque-model` : un vecteur vide équivaut à `Any`.
@@ -74,6 +92,7 @@ fn addr_object_contains(
         path.push(id.clone());
         return Err(EvalError::ObjectCycle { path });
     }
+    check_group_depth(stack, id)?;
     let obj = store
         .addresses
         .get(id)
@@ -134,6 +153,7 @@ fn service_object_matches(
         path.push(id.clone());
         return Err(EvalError::ObjectCycle { path });
     }
+    check_group_depth(stack, id)?;
     let obj = store
         .services
         .get(id)
@@ -217,6 +237,46 @@ mod tests {
         match addr_expr_contains(&s, &expr, &ip) {
             Err(EvalError::ObjectCycle { path }) => assert!(path.len() >= 3),
             other => panic!("cycle attendu, obtenu {other:?}"),
+        }
+    }
+
+    /// Une chaîne de groupes tous distincts, de longueur donnée, dont le
+    /// dernier maillon contient le réseau.
+    fn chaine_de_groupes(longueur: usize) -> ObjectStore {
+        let mut s = ObjectStore::default();
+        for i in 0..longueur {
+            s.addresses.insert(
+                ObjectId::new(format!("G{i}")),
+                AddrObject::Group(vec![ObjectId::new(format!("G{}", i + 1))]),
+            );
+        }
+        s.addresses.insert(
+            ObjectId::new(format!("G{longueur}")),
+            AddrObject::Nets(vec!["10.0.10.0/24".parse().expect("net")]),
+        );
+        s
+    }
+
+    #[test]
+    fn chaine_profonde_mais_legitime_resolue() {
+        let s = chaine_de_groupes(MAX_GROUP_DEPTH - 2);
+        let ip: IpAddr = "10.0.10.5".parse().expect("ip");
+        let expr = AddrExpr::Object(ObjectId::new("G0"));
+        assert_eq!(addr_expr_contains(&s, &expr, &ip), Ok(true));
+    }
+
+    #[test]
+    fn chaine_hostile_bornee_sans_deborder_la_pile() {
+        // Sans la borne, 100 000 groupes distincts feraient déborder la
+        // pile (R2 de l'audit) ; avec elle, erreur propre et immédiate.
+        let s = chaine_de_groupes(100_000);
+        let ip: IpAddr = "10.0.10.5".parse().expect("ip");
+        let expr = AddrExpr::Object(ObjectId::new("G0"));
+        match addr_expr_contains(&s, &expr, &ip) {
+            Err(EvalError::GroupTooDeep { depth, .. }) => {
+                assert_eq!(depth, MAX_GROUP_DEPTH);
+            }
+            other => panic!("GroupTooDeep attendu, obtenu {other:?}"),
         }
     }
 

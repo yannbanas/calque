@@ -17,6 +17,10 @@ pub enum EvalError {
     ServiceObjectMissing { object: ObjectId },
     /// Cycle dans les groupes d'objets ; `path` est le chemin fautif.
     ObjectCycle { path: Vec<ObjectId> },
+    /// Chaîne de groupes imbriqués plus profonde que la borne de sûreté :
+    /// une configuration hostile ne doit pas pouvoir faire déborder la pile
+    /// sur le chemin qui décide du verdict (audit 2026-08-12, R2).
+    GroupTooDeep { object: ObjectId, depth: usize },
     /// Politique accrochée au pipeline (ou cible d'un saut) introuvable.
     PolicyMissing { policy: PolicyId },
     /// Cycle de sauts entre politiques.
@@ -76,6 +80,11 @@ impl std::fmt::Display for EvalError {
                     chain.join(" -> ")
                 )
             }
+            EvalError::GroupTooDeep { object, depth } => write!(
+                f,
+                "groupes imbriqués trop profonds (> {depth}) à partir de \
+                 l'objet « {object} »"
+            ),
             EvalError::PolicyMissing { policy } => {
                 write!(f, "politique « {policy} » introuvable")
             }

@@ -5,11 +5,15 @@
 //! une `Trace` : le verdict ET la justification, saut par saut, règle par
 //! règle — car la trace est le produit (§5.2).
 //!
-//! Version actuelle : mode CONCRET uniquement (propagation d'un
-//! `ConcretePacket`). Le mode symbolique (§5.3), qui propagera un
-//! `HeaderSpace` de `calque-space`, viendra plus tard derrière le même
-//! découpage — c'est pour cela que la résolution des objets, l'évaluation
-//! des politiques et la recherche de route sont des modules séparés.
+//! Deux modes, même sémantique :
+//! - CONCRET : propagation d'un `ConcretePacket` (`engine.rs`) ;
+//! - SYMBOLIQUE (§5.3) : propagation d'un `HeaderSet` de `calque-space`
+//!   (`symbolic.rs`, `sympolicy.rs`, `symtrace.rs`), la sortie devenant un
+//!   ARBRE de sous-ensembles verdicts. C'est la brique de `reach.rs`
+//!   (« qui peut atteindre quoi ») et de `dead.rs` (règles mortes et
+//!   masquées). La cohérence des deux modes est testée : tout paquet
+//!   échantillonné d'un sous-ensemble symbolique reçoit le même verdict du
+//!   moteur concret (§4.3).
 //!
 //! Principes respectés :
 //! - résolution TARDIVE des objets (§3.3), groupes imbriqués compris, avec
@@ -19,18 +23,34 @@
 //! - ne jamais deviner (§6.3) : tout élément manquant ou ambigu sur le
 //!   chemin produit un verdict `Unknown` accompagné d'un diagnostic.
 
+pub mod dead;
 pub mod engine;
 pub mod error;
 pub mod policy;
+pub mod reach;
 pub mod resolve;
 pub mod route;
+pub mod symbolic;
+pub mod sympolicy;
+pub mod symtrace;
 pub mod topology;
 pub mod trace;
 
+#[cfg(test)]
+mod testutil;
+
+pub use dead::{dead_rules, DeadRule, DeadRuleKind, Masker, MAX_UNION_CUBES};
 pub use engine::{trace_packet, trace_packet_from};
 pub use error::EvalError;
 pub use policy::{evaluate_policy, FilterPoint, FilterResult, NatGrant, PolicyEvaluation};
+pub use reach::{reach_from, reach_to, ReachFlow, ReachReport};
 pub use resolve::packet_matches_rule;
 pub use route::{lookup_route, RouteDecision};
+pub use symbolic::rule_headerset;
+pub use sympolicy::{evaluate_policy_symbolic, SymFilterResult, SymbolicPart, MAX_CUBES};
+pub use symtrace::{
+    symbolic_trace_from, SymbolicBranch, SymbolicDecision, SymbolicNode, SymbolicTrace,
+    SymbolicVerdictSet, MAX_DEPTH, MAX_NODES,
+};
 pub use topology::{check_topology, infer_links_from_subnets, TopologyIssue, TopologyIssueKind};
 pub use trace::{Decision, Hop, Outcome, Stage, Trace, Verdict};

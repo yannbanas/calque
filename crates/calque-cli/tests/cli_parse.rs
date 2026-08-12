@@ -99,6 +99,47 @@ fn plan_exige_candidate() {
 }
 
 #[test]
+fn scrub_fichiers_et_options() {
+    // Au moins un fichier est requis.
+    assert!(Cli::try_parse_from(["calque", "scrub"]).is_err());
+
+    let cli = Cli::try_parse_from([
+        "calque",
+        "scrub",
+        "fw-01.conf",
+        "fw-02.conf",
+        "--out-dir",
+        "anon/",
+        "--map",
+        "table.tsv",
+        "--force",
+    ])
+    .unwrap();
+    match cli.command {
+        Command::Scrub(args) => {
+            assert_eq!(args.files.len(), 2);
+            assert_eq!(args.files[0].to_str(), Some("fw-01.conf"));
+            assert_eq!(args.out_dir.as_deref().unwrap().to_str(), Some("anon/"));
+            assert_eq!(args.map.as_deref().unwrap().to_str(), Some("table.tsv"));
+            assert!(args.force);
+        }
+        other => panic!("commande inattendue : {other:?}"),
+    }
+
+    // Les valeurs par défaut : ni --out-dir, ni --map, ni --force.
+    let cli = Cli::try_parse_from(["calque", "scrub", "fw-01.conf"]).unwrap();
+    match cli.command {
+        Command::Scrub(args) => {
+            assert_eq!(args.files.len(), 1);
+            assert!(args.out_dir.is_none());
+            assert!(args.map.is_none());
+            assert!(!args.force);
+        }
+        other => panic!("commande inattendue : {other:?}"),
+    }
+}
+
+#[test]
 fn topology_check() {
     let cli = Cli::try_parse_from(["calque", "topology", "check"]).unwrap();
     match cli.command {

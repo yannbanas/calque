@@ -10,7 +10,7 @@
 
 use crate::error::ParseError;
 use crate::tokenize::tokenize;
-use crate::tree::{ConfigNode, ConfigTree};
+use crate::tree::{ConfigNode, ConfigTree, MAX_DEPTH};
 
 /// Nature d'un bloc ouvert : décide quel mot-clé le referme.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -34,6 +34,10 @@ struct Frame {
 pub fn parse(input: &str, filename: &str) -> Result<ConfigTree, ParseError> {
     let mut roots: Vec<ConfigNode> = Vec::new();
     let mut stack: Vec<Frame> = Vec::new();
+    // Nombre de blocs `config` actuellement ouverts : permet de valider un
+    // `end` en O(1) au lieu de parcourir la pile (une entrée hostile
+    // alternant `edit`/`config`/`end` rendrait ce parcours quadratique).
+    let mut open_configs: usize = 0;
 
     for (index, raw) in input.lines().enumerate() {
         let line = index as u32 + 1;
@@ -51,19 +55,26 @@ pub fn parse(input: &str, filename: &str) -> Result<ConfigTree, ParseError> {
         let args = tokens;
 
         match keyword.as_str() {
-            "config" => stack.push(Frame {
-                kind: FrameKind::Config,
-                node: ConfigNode::new(keyword, args, filename, line),
-            }),
-            "edit" => stack.push(Frame {
-                kind: FrameKind::Edit,
-                node: ConfigNode::new(keyword, args, filename, line),
-            }),
+            "config" => {
+                ensure_depth(&stack, filename, line)?;
+                open_configs += 1;
+                stack.push(Frame {
+                    kind: FrameKind::Config,
+                    node: ConfigNode::new(keyword, args, filename, line),
+                });
+            }
+            "edit" => {
+                ensure_depth(&stack, filename, line)?;
+                stack.push(Frame {
+                    kind: FrameKind::Edit,
+                    node: ConfigNode::new(keyword, args, filename, line),
+                });
+            }
             "end" => {
                 // `end` ferme le bloc `config` le plus proche. Comme sur
                 // l'équipement réel, il referme au passage les `edit`
                 // restés ouverts à l'intérieur.
-                if !stack.iter().any(|f| f.kind == FrameKind::Config) {
+                if open_configs == 0 {
                     return Err(ParseError::OrphanEnd {
                         file: filename.to_owned(),
                         line,
@@ -74,6 +85,7 @@ pub fn parse(input: &str, filename: &str) -> Result<ConfigTree, ParseError> {
                     let closes_config = frame.kind == FrameKind::Config;
                     attach(&mut stack, &mut roots, frame.node);
                     if closes_config {
+                        open_configs -= 1;
                         break;
                     }
                 }
@@ -118,6 +130,18 @@ pub fn parse(input: &str, filename: &str) -> Result<ConfigTree, ParseError> {
         roots,
         file: filename.to_owned(),
     })
+}
+
+/// Refuse d'empiler au-delà de la limite de sûreté (§11.3).
+fn ensure_depth(stack: &[Frame], filename: &str, line: u32) -> Result<(), ParseError> {
+    if stack.len() >= MAX_DEPTH {
+        return Err(ParseError::TooDeep {
+            file: filename.to_owned(),
+            line,
+            limit: MAX_DEPTH,
+        });
+    }
+    Ok(())
 }
 
 /// Rattache `node` au bloc ouvert le plus proche, ou aux racines.
@@ -373,5 +397,57 @@ end
     fn entree_vide_donne_un_arbre_vide() {
         let tree = parse("", "vide.conf").expect("vide est valide");
         assert!(tree.roots.is_empty());
+    }
+
+    /// §11.3 — une imbrication hostile plus profonde que la limite est
+    /// refusée AVANT de construire l'arbre (sinon la destruction récursive
+    /// du `ConfigNode` pourrait faire déborder la pile en aval).
+    #[test]
+    fn imbrication_hostile_refusee_a_la_limite() {
+        let profondeur = MAX_DEPTH + 1;
+        let mut input = String::new();
+        for _ in 0..profondeur {
+            input.push_str("config a\n");
+        }
+        for _ in 0..profondeur {
+            input.push_str("end\n");
+        }
+        let err = parse(&input, "hostile.conf").expect_err("trop profond");
+        assert_eq!(
+            err,
+            ParseError::TooDeep {
+                file: "hostile.conf".to_owned(),
+                line: MAX_DEPTH as u32 + 1,
+                limit: MAX_DEPTH,
+            }
+        );
+
+        // Juste SOUS la limite : accepté, l'arbre est complet.
+        let mut ok = String::new();
+        for _ in 0..MAX_DEPTH {
+            ok.push_str("config a\n");
+        }
+        for _ in 0..MAX_DEPTH {
+            ok.push_str("end\n");
+        }
+        let tree = parse(&ok, "profond.conf").expect("sous la limite");
+        assert_eq!(tree.roots.len(), 1);
+    }
+
+    /// Le compteur de blocs `config` ouverts reste juste quand `end`
+    /// referme aussi des `edit` restés ouverts (pas de double décompte).
+    #[test]
+    fn end_orphelin_apres_fermetures_imbriquees() {
+        // Deux `config` fermés (le second referme son `edit`), puis un
+        // `end` de trop.
+        let input = "config a\nend\nconfig b\n edit x\nend\nend\n";
+        let err = parse(input, "t.conf").expect_err("end orphelin");
+        assert_eq!(
+            err,
+            ParseError::OrphanEnd {
+                file: "t.conf".to_owned(),
+                line: 6,
+            }
+        );
     }
 }

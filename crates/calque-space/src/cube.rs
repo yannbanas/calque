@@ -95,6 +95,17 @@ impl Cube {
                 && self.dport.contains_set(&other.dport))
     }
 
+    /// Vrai si les deux pavés n'ont aucun paquet en commun : il suffit
+    /// qu'UNE dimension soit disjointe (produit cartésien). Test direct,
+    /// sans allocation.
+    pub fn is_disjoint(&self, other: &Self) -> bool {
+        self.src.is_disjoint(&other.src)
+            || self.dst.is_disjoint(&other.dst)
+            || self.proto.intersect(&other.proto).is_empty()
+            || self.sport.is_disjoint(&other.sport)
+            || self.dport.is_disjoint(&other.dport)
+    }
+
     /// `self \ other`, en pavés disjoints.
     ///
     /// Découpe dimension par dimension : à chaque étape, la part de `rest`

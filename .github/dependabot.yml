@@ -1,0 +1,27 @@
+# Mises à jour automatiques des dépendances. Les montées mineures et
+# correctives de cargo sont groupées en une seule PR hebdomadaire pour
+# limiter le bruit ; les majeures restent des PR séparées.
+version: 2
+updates:
+  - package-ecosystem: cargo
+    directories:
+      - "/"
+      - "/fuzz"
+    schedule:
+      interval: weekly
+      day: monday
+    groups:
+      cargo-mineures-et-correctives:
+        update-types:
+          - minor
+          - patch
+    labels:
+      - dependances
+
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
+      day: monday
+    labels:
+      - dependances

@@ -254,6 +254,174 @@ flows:
 }
 
 // ---------------------------------------------------------------------------
+// reach (mode symbolique)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn reach_to_trouve_le_flux_autorise() {
+    let tmp = projet_importe();
+    // Politique 2 de la fixture : r-postes (10.10.1.50-69) → h-srv-web
+    // (10.10.2.10) sur TCP-8443. Le rapport doit trouver ce flux, citer la
+    // règle décisive et donner un paquet exemple.
+    let out = calque(tmp.path(), &["reach", "--to", "10.10.2.10:8443/tcp"]);
+    assert_code(&out, 0);
+    let txt = stdout(&out);
+    assert!(
+        txt.contains("Tout ce qui peut atteindre 10.10.2.10:8443/tcp"),
+        "sortie reach : {txt}"
+    );
+    assert!(txt.contains("entrée fw-lab-01/lan"), "sortie reach : {txt}");
+    // L'ensemble couvre la plage r-postes (10.10.1.50-69) : son premier
+    // préfixe apparaît dans le résumé.
+    assert!(txt.contains("10.10.1.50/31"), "l'ensemble résumé : {txt}");
+    assert!(txt.contains("exemple"), "le paquet exemple : {txt}");
+    assert!(
+        txt.contains("autorisé par la règle 2"),
+        "la règle décisive : {txt}"
+    );
+    assert!(txt.contains("ligne 82"), "la ligne d'origine : {txt}");
+}
+
+#[test]
+fn reach_from_liste_ce_que_la_dmz_atteint() {
+    let tmp = projet_importe();
+    // Politique 5 : h-srv-web (10.10.2.10) → wan, tout service. La route
+    // par défaut sort par « wan », interface sans lien modélisé : le
+    // rapport contient donc des parts non décidables, affichées
+    // honnêtement, et le code de sortie est 3 (rapport non ferme, §6.3).
+    let out = calque(tmp.path(), &["reach", "--from", "10.10.2.10"]);
+    assert_code(&out, 3);
+    let txt = stdout(&out);
+    assert!(
+        txt.contains("Tout ce que 10.10.2.10 peut atteindre"),
+        "sortie reach : {txt}"
+    );
+    assert!(txt.contains("entrée fw-lab-01/dmz"), "sortie reach : {txt}");
+    assert!(
+        txt.contains("autorisé par la règle 5"),
+        "la règle décisive : {txt}"
+    );
+    assert!(
+        txt.contains("part(s) non décidable(s)"),
+        "les parts indécidables sont affichées : {txt}"
+    );
+    assert!(txt.contains("NON FERME"), "sortie reach : {txt}");
+}
+
+#[test]
+fn reach_to_zone_du_modele() {
+    let tmp = projet_importe();
+    // La zone z-dmz de la fixture couvre le sous-réseau 10.10.2.0/24.
+    let out = calque(tmp.path(), &["reach", "--to", "z-dmz:8443/tcp"]);
+    assert_code(&out, 0);
+    let txt = stdout(&out);
+    assert!(
+        txt.contains("la zone « z-dmz » (10.10.2.0/24):8443/tcp"),
+        "sortie reach : {txt}"
+    );
+    assert!(
+        txt.contains("autorisé par la règle 2"),
+        "la règle décisive : {txt}"
+    );
+}
+
+#[test]
+fn reach_zone_inconnue_erreur_claire() {
+    let tmp = projet_importe();
+    let out = calque(tmp.path(), &["reach", "--to", "vlan-fantome"]);
+    assert_code(&out, 1);
+    let txt = stderr(&out);
+    // (miette replie le message : on vérifie le début de la phrase.)
+    assert!(txt.contains("vlan-fantome"), "stderr : {txt}");
+    assert!(
+        txt.contains("ne correspond ni à une adresse"),
+        "l'erreur est claire : {txt}"
+    );
+}
+
+#[test]
+fn reach_json_est_structure() {
+    let tmp = projet_importe();
+    let out = calque(
+        tmp.path(),
+        &["reach", "--to", "10.10.2.10:8443/tcp", "--format", "json"],
+    );
+    assert_code(&out, 0);
+    let v: serde_json::Value = serde_json::from_str(&stdout(&out)).expect("sortie JSON valide");
+    let flows = v["flows"].as_array().expect("tableau flows");
+    assert!(!flows.is_empty(), "au moins un flux");
+    assert_eq!(flows[0]["entry"], "fw-lab-01/lan");
+}
+
+// ---------------------------------------------------------------------------
+// model dead-rules
+// ---------------------------------------------------------------------------
+
+#[test]
+fn dead_rules_fixture_saine() {
+    let tmp = projet_importe();
+    // La fixture n'a pas de règle morte : les zones des politiques sont
+    // deux à deux incompatibles (et la politique 4, désactivée, n'est pas
+    // importée).
+    let out = calque(tmp.path(), &["model", "dead-rules"]);
+    assert_code(&out, 0);
+    let txt = stdout(&out);
+    assert!(txt.contains("Aucune règle morte"), "sortie : {txt}");
+    assert!(
+        txt.contains("1 équipement(s) analysé(s), 0 règle(s) morte(s)."),
+        "sortie : {txt}"
+    );
+}
+
+#[test]
+fn dead_rules_detecte_une_regle_masquee() {
+    // La fixture augmentée d'une politique 6 identique à la 2 (mêmes
+    // zones, mêmes objets) mais en refus : entièrement masquée par la 2.
+    // L'edit est inséré DANS le bloc `config firewall policy` existant
+    // (le dernier bloc de la fixture), pas dans un second bloc.
+    let tmp = TempDir::new().expect("répertoire temporaire");
+    let tronc = BASIC
+        .trim_end()
+        .strip_suffix("end")
+        .expect("la fixture se termine par le `end` du bloc de politiques");
+    let augmentee = format!(
+        "{tronc}    edit 6\n        set name \"doublon-mort\"\n        \
+         set srcintf \"lan\"\n        set dstintf \"z-dmz\"\n        set srcaddr \"r-postes\"\n        \
+         set dstaddr \"h-srv-web\"\n        set action deny\n        set schedule \"always\"\n        \
+         set service \"TCP-8443\"\n    next\nend\n"
+    );
+    std::fs::write(tmp.path().join("masque.conf"), augmentee).expect("écriture");
+    let out = calque(tmp.path(), &["import", "masque.conf"]);
+    assert_code(&out, 0);
+
+    let out = calque(tmp.path(), &["model", "dead-rules"]);
+    assert_code(&out, 0);
+    let txt = stdout(&out);
+    assert!(txt.contains("MASQUÉE"), "sortie : {txt}");
+    assert!(txt.contains("règle 6"), "la règle morte : {txt}");
+    assert!(
+        txt.contains("masquée par : la règle 2"),
+        "le masque : {txt}"
+    );
+    assert!(txt.contains("ligne 82"), "la ligne du masque : {txt}");
+    assert!(txt.contains("paquet témoin"), "le témoin : {txt}");
+    assert!(
+        txt.contains("1 équipement(s) analysé(s), 1 règle(s) morte(s)."),
+        "sortie : {txt}"
+    );
+}
+
+#[test]
+fn dead_rules_json_est_structure() {
+    let tmp = projet_importe();
+    let out = calque(tmp.path(), &["model", "dead-rules", "--format", "json"]);
+    assert_code(&out, 0);
+    let v: serde_json::Value = serde_json::from_str(&stdout(&out)).expect("sortie JSON valide");
+    assert_eq!(v["devices"], 1);
+    assert_eq!(v["rules"].as_array().expect("tableau rules").len(), 0);
+}
+
+// ---------------------------------------------------------------------------
 // plan
 // ---------------------------------------------------------------------------
 
@@ -298,6 +466,172 @@ flows:
     assert!(txt.contains("avant : autorisé"), "avant/après : {txt}");
     assert!(txt.contains("après : refusé"), "avant/après : {txt}");
     assert!(txt.contains("règle 2"), "la règle décisive : {txt}");
+}
+
+// ---------------------------------------------------------------------------
+// scrub (§10, §11.4)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn scrub_un_fichier_vers_stdout() {
+    let tmp = TempDir::new().expect("répertoire temporaire");
+    std::fs::write(tmp.path().join("basic.conf"), BASIC).expect("écriture de la fixture");
+    let out = calque(tmp.path(), &["scrub", "basic.conf"]);
+    assert_code(&out, 0);
+    let txt = stdout(&out);
+
+    // Aucune adresse ni nom d'origine ne subsiste.
+    for original in ["10.10.1.1", "10.10.2.10", "10.200.0.2", "fw-lab-01"] {
+        assert!(!txt.contains(original), "« {original} » a fui : {txt}");
+    }
+    // La structure survit : directives, masques et numéros intacts.
+    assert!(txt.contains("config firewall policy"), "structure : {txt}");
+    assert!(txt.contains("255.255.255.0"), "masque intact : {txt}");
+    assert!(txt.contains("edit 2"), "identifiants de règles : {txt}");
+    assert!(txt.contains("set tcp-portrange 8443"), "ports : {txt}");
+    // Le rappel §11.4 est sur stderr (la sortie redirigée reste propre).
+    let err = stderr(&out);
+    assert!(err.contains("pas un chiffrement"), "rappel §11.4 : {err}");
+    assert!(!txt.contains("pas un chiffrement"), "stdout propre : {txt}");
+
+    // La sortie se ré-analyse : l'import du résultat anonymisé passe.
+    std::fs::write(tmp.path().join("anon.conf"), &txt).expect("écriture du résultat");
+    let out = calque(tmp.path(), &["import", "anon.conf"]);
+    assert_code(&out, 0);
+    assert!(
+        stdout(&out).contains("FortiGate"),
+        "le résultat reste une configuration FortiGate"
+    );
+}
+
+#[test]
+fn scrub_multi_fichiers_coherent() {
+    let tmp = TempDir::new().expect("répertoire temporaire");
+    // La même adresse dans deux fichiers : le remplacement doit être
+    // identique des deux côtés (un seul Scrubber pour tout l'appel).
+    std::fs::write(
+        tmp.path().join("a.conf"),
+        "set ip 10.77.66.55 255.255.255.0\n",
+    )
+    .expect("écriture a.conf");
+    std::fs::write(tmp.path().join("b.conf"), "ping 10.77.66.55\n").expect("écriture b.conf");
+
+    let out = calque(tmp.path(), &["scrub", "a.conf", "b.conf"]);
+    assert_code(&out, 0);
+    let txt = stdout(&out);
+    assert!(txt.contains("2 fichier(s) anonymisé(s)."), "récap : {txt}");
+    assert!(txt.contains("a.anon.conf"), "nommage : {txt}");
+
+    let a = std::fs::read_to_string(tmp.path().join("a.anon.conf")).expect("a.anon.conf");
+    let b = std::fs::read_to_string(tmp.path().join("b.anon.conf")).expect("b.anon.conf");
+    assert!(!a.contains("10.77.66.55"), "a anonymisé : {a}");
+    assert!(!b.contains("10.77.66.55"), "b anonymisé : {b}");
+    // Le remplacement extrait de b se retrouve tel quel dans a.
+    let remplacement = b
+        .trim()
+        .strip_prefix("ping ")
+        .expect("b garde sa structure")
+        .to_owned();
+    assert!(
+        a.contains(&format!("set ip {remplacement} 255.255.255.0")),
+        "cohérence inter-fichiers : a = {a}, remplacement = {remplacement}"
+    );
+}
+
+#[test]
+fn scrub_map_ecrit_la_table_de_correspondance() {
+    let tmp = TempDir::new().expect("répertoire temporaire");
+    std::fs::write(tmp.path().join("basic.conf"), BASIC).expect("écriture de la fixture");
+    let out = calque(tmp.path(), &["scrub", "basic.conf", "--map", "table.tsv"]);
+    assert_code(&out, 0);
+
+    let table = std::fs::read_to_string(tmp.path().join("table.tsv")).expect("table.tsv");
+    // L'avertissement de tête.
+    assert!(
+        table.starts_with("# Table de correspondance"),
+        "en-tête : {table}"
+    );
+    assert!(
+        table.contains("ne jamais publier"),
+        "avertissement : {table}"
+    );
+    // Une correspondance connue : le hostname de la fixture.
+    assert!(
+        table.contains("fw-lab-01\tanon-host-1"),
+        "correspondance hostname : {table}"
+    );
+    // Les adresses y sont, en original<TAB>remplacement.
+    assert!(table.contains("10.10.2.10\t"), "adresse : {table}");
+}
+
+#[test]
+fn scrub_refuse_d_ecraser_sans_force() {
+    let tmp = TempDir::new().expect("répertoire temporaire");
+    std::fs::write(tmp.path().join("a.conf"), "ping 10.1.2.3\n").expect("écriture a.conf");
+    std::fs::write(tmp.path().join("b.conf"), "ping 10.4.5.6\n").expect("écriture b.conf");
+    std::fs::write(tmp.path().join("a.anon.conf"), "sentinelle\n").expect("écriture sentinelle");
+
+    let out = calque(tmp.path(), &["scrub", "a.conf", "b.conf"]);
+    assert_code(&out, 1);
+    let err = stderr(&out);
+    assert!(err.contains("existe déjà"), "refus : {err}");
+    assert!(err.contains("--force"), "l'aide mentionne --force : {err}");
+    // Rien n'a été écrit : la sentinelle est intacte, b n'a pas de sortie.
+    let sentinelle = std::fs::read_to_string(tmp.path().join("a.anon.conf")).expect("sentinelle");
+    assert_eq!(sentinelle, "sentinelle\n");
+    assert!(
+        !tmp.path().join("b.anon.conf").exists(),
+        "aucune sortie partielle"
+    );
+
+    // Avec --force, l'écrasement est accepté.
+    let out = calque(tmp.path(), &["scrub", "a.conf", "b.conf", "--force"]);
+    assert_code(&out, 0);
+    let a = std::fs::read_to_string(tmp.path().join("a.anon.conf")).expect("a.anon.conf");
+    assert_ne!(a, "sentinelle\n", "la sortie a bien remplacé la sentinelle");
+    assert!(!a.contains("10.1.2.3"), "et elle est anonymisée : {a}");
+}
+
+#[test]
+fn scrub_fichier_introuvable_et_non_utf8() {
+    let tmp = TempDir::new().expect("répertoire temporaire");
+    // Introuvable : erreur claire, pas de panique.
+    let out = calque(tmp.path(), &["scrub", "fantome.conf"]);
+    assert_code(&out, 1);
+    assert!(
+        stderr(&out).contains("fantome.conf"),
+        "le fichier est nommé : {}",
+        stderr(&out)
+    );
+
+    // Non-UTF8 : message clair, pas de panique.
+    std::fs::write(tmp.path().join("binaire.conf"), [0xff, 0xfe, 0x00, 0x42])
+        .expect("écriture binaire");
+    let out = calque(tmp.path(), &["scrub", "binaire.conf"]);
+    assert_code(&out, 1);
+    assert!(
+        stderr(&out).contains("UTF-8"),
+        "l'encodage est expliqué : {}",
+        stderr(&out)
+    );
+}
+
+// ---------------------------------------------------------------------------
+// bornes de taille (audit R1)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn flows_trop_gros_refuse_proprement() {
+    let tmp = projet_importe();
+    // 4 Mo + 1 octet de commentaires : refusé AVANT le parseur YAML.
+    let gros = "#".repeat(4 * 1024 * 1024 + 1);
+    std::fs::write(tmp.path().join("flows.yaml"), gros).expect("écriture flows.yaml");
+    let out = calque(tmp.path(), &["test"]);
+    assert_code(&out, 1);
+    let err = stderr(&out);
+    assert!(err.contains("limite"), "la borne est expliquée : {err}");
+    assert!(err.contains("4 Mo"), "la borne est chiffrée : {err}");
+    assert!(err.contains("flows.yaml"), "le fichier est nommé : {err}");
 }
 
 // ---------------------------------------------------------------------------

@@ -123,7 +123,7 @@ pub struct Endpoint {
     pub iface: IfaceId,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct Link {
     pub a: Endpoint,
     pub b: Endpoint,
@@ -131,7 +131,7 @@ pub struct Link {
     pub origin: LinkOrigin,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum LinkOrigin {
     Lldp,
     Declared,
@@ -220,7 +220,11 @@ pub struct Vrf {
     pub routes: Vec<Route>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+// `Ord` (dérivé, ordre structurel) permet aux consommateurs — dont
+// `calque-diff` — de comparer des listes de routes en O(n log n) plutôt
+// qu'en quadratique : une configuration hostile aux dizaines de milliers
+// de routes ne doit pas transformer `calque plan` en déni de service.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct Route {
     pub prefix: IpNet,
     pub next_hop: NextHop,
@@ -229,7 +233,7 @@ pub struct Route {
     pub source: Option<SourceSpan>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum NextHop {
     Ip(IpAddr),
     Interface(IfaceId),
@@ -237,7 +241,7 @@ pub enum NextHop {
     Drop,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum RouteOrigin {
     Static,
     Connected,

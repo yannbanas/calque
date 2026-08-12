@@ -6,6 +6,15 @@
 use calque_model::SourceSpan;
 use serde::{Deserialize, Serialize};
 
+/// Profondeur d'imbrication maximale acceptée par les analyseurs (§11.3).
+///
+/// `ConfigNode` est une structure récursive : sa destruction, son clonage,
+/// sa comparaison et sa sérialisation dérivées consomment de la pile
+/// proportionnellement à la profondeur de l'arbre. Une entrée hostile ne
+/// doit pas pouvoir choisir cette profondeur — les configurations réelles
+/// s'imbriquent sur moins de dix niveaux, la limite est très large.
+pub(crate) const MAX_DEPTH: usize = 512;
+
 /// Un nœud de l'arbre générique.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ConfigNode {
