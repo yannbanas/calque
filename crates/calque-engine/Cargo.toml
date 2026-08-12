@@ -3,6 +3,7 @@ name = "calque-engine"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+publish = false
 
 # Mode concret uniquement pour l'instant : pas de dépendance à calque-space
 # (implémenté en parallèle). Le mode symbolique (§5.3) la réintroduira.

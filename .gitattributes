@@ -1,0 +1,4 @@
+# Fins de ligne LF partout, sur toutes les plateformes.
+# Les tests incluent des fixtures via include_str! et comparent des
+# chaînes avec \n : un checkout CRLF (autocrlf sous Windows) les casserait.
+* text=auto eol=lf

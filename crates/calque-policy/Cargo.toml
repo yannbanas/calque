@@ -3,6 +3,7 @@ name = "calque-policy"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+publish = false
 
 # Crate PUR (§1) : pas d'entrée-sortie. La lecture du fichier flows.yaml
 # vit dans calque-cli ; ici on ne fait que désérialiser des chaînes.

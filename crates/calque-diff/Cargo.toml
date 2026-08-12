@@ -3,6 +3,7 @@ name = "calque-diff"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+publish = false
 
 # Crate PUR (CALQUE-ARCHITECTURE.md §1) : aucune dépendance d'entrée-sortie.
 # La comparaison de COMPORTEMENT (S4) s'appuie sur calque-engine (pur) pour
