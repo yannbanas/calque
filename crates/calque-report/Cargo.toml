@@ -5,15 +5,18 @@ edition.workspace = true
 license.workspace = true
 publish = false
 
-# NOTE coordination : ce crate rend des « vues » (TraceView, FlowResult,
-# ReachView, DeadRulesView) construites à partir de calque-model et de
-# calque-space (les ensembles symboliques à résumer). L'adaptation depuis
-# les types réels de calque-engine (Trace, ReachReport, DeadRule…) se fait
-# dans calque-cli, ce qui évite de coupler les rendus au moteur pendant que
-# celui-ci est implémenté en parallèle.
+# NOTE coordination : ce crate rend des « vues » (TraceView, ReachView,
+# DeadRulesView) construites à partir de calque-model et de calque-space
+# (les ensembles symboliques à résumer). L'adaptation depuis les types
+# réels de calque-engine (Trace, ReachReport, DeadRule…) se fait dans
+# calque-cli, ce qui évite de coupler les rendus au moteur. Les types
+# FlowResult/FlowStatus vivent dans calque-policy (au plus près de
+# `evaluate_flow`, qui les produit) et sont ré-exportés ici pour
+# compatibilité.
 
 [dependencies]
 calque-model = { workspace = true }
+calque-policy = { workspace = true }
 calque-space = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

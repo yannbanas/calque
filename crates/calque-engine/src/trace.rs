@@ -62,6 +62,25 @@ pub enum Stage {
     Nat,
 }
 
+impl Stage {
+    /// Libellé français de l'étape — le vocabulaire des traces rendues
+    /// (identique à celui de `calque-report`).
+    pub fn label(self) -> &'static str {
+        match self {
+            Stage::IngressFilter => "filtre d'entrée",
+            Stage::Nat => "traduction d'adresse",
+            Stage::Route => "routage",
+            Stage::EgressFilter => "filtre de sortie",
+        }
+    }
+}
+
+impl std::fmt::Display for Stage {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.label())
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Outcome {
     /// La règle correspond et accepte le paquet (décisive).
@@ -85,4 +104,28 @@ pub enum Outcome {
     RouteDrop,
     /// En-tête réécrit par une traduction d'adresse (étape `Nat`).
     Rewritten,
+}
+
+impl Outcome {
+    /// Libellé français de l'issue — le vocabulaire des traces rendues
+    /// (identique à celui de `calque-report`).
+    pub fn label(self) -> &'static str {
+        match self {
+            Outcome::Accepted => "accepté",
+            Outcome::Denied => "refusé",
+            Outcome::Matched => "correspond aussi",
+            Outcome::NoMatch => "aucune correspondance",
+            Outcome::DefaultAction => "action par défaut de la politique",
+            Outcome::RouteFound => "route retenue",
+            Outcome::NoRoute => "aucune route vers la destination",
+            Outcome::RouteDrop => "route de rejet explicite",
+            Outcome::Rewritten => "en-tête réécrit",
+        }
+    }
+}
+
+impl std::fmt::Display for Outcome {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.label())
+    }
 }

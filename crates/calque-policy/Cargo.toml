@@ -6,15 +6,21 @@ license.workspace = true
 publish = false
 
 # Crate PUR (§1) : pas d'entrée-sortie. La lecture du fichier flows.yaml
-# vit dans calque-cli ; ici on ne fait que désérialiser des chaînes.
-#
-# NOTE coordination : les dépendances calque-space et calque-engine seront
-# ajoutées quand les invariants s'appuieront sur le moteur (S3+). Pour
-# l'instant, seul calque-model est nécessaire.
+# vit dans calque-cli ; ici on ne fait que désérialiser des chaînes et
+# évaluer des flux contre un modèle déjà en mémoire (via calque-engine,
+# pur lui aussi).
 
 [dependencies]
 calque-model = { workspace = true }
+calque-engine = { workspace = true }
 ipnet = { workspace = true }
 serde = { workspace = true }
 serde_yaml = { workspace = true }
 thiserror = { workspace = true }
+
+[dev-dependencies]
+# Uniquement pour l'exemple de bout en bout dans la rustdoc de
+# `evaluate_flow` (chaîne complète : texte → modèle → verdict). Les
+# dépendances de développement ne comptent pas dans l'arbre `normal`
+# vérifié par scripts/check-purity.sh.
+calque-vendors = { workspace = true }

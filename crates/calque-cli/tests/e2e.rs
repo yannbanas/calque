@@ -196,6 +196,55 @@ fn path_explain_montre_la_trace() {
 }
 
 #[test]
+fn path_json_est_structure() {
+    let tmp = projet_importe();
+    let out = calque(
+        tmp.path(),
+        &[
+            "path",
+            "10.10.1.55",
+            "->",
+            "10.10.2.10:8443/tcp",
+            "--format",
+            "json",
+        ],
+    );
+    assert_code(&out, 0);
+    let v: serde_json::Value = serde_json::from_str(&stdout(&out)).expect("sortie JSON valide");
+    assert_eq!(v["verdict"], "Allowed");
+    let hops = v["hops"].as_array().expect("tableau hops");
+    assert!(!hops.is_empty(), "au moins un saut");
+    assert_eq!(hops[0]["device"], "fw-lab-01");
+    // La justification règle par règle est structurée, span compris.
+    let decisions = hops[0]["decisions"].as_array().expect("tableau decisions");
+    assert!(
+        decisions.iter().any(|d| d["rule"] == "2"),
+        "la règle décisive est présente : {decisions:?}"
+    );
+}
+
+#[test]
+fn path_json_refuse_garde_le_code_de_sortie() {
+    let tmp = projet_importe();
+    // Politique 3 : z-dmz → lan refusé ; le JSON est la seule sortie et
+    // le code de sortie reste 1.
+    let out = calque(
+        tmp.path(),
+        &[
+            "path",
+            "10.10.2.10",
+            "->",
+            "10.10.1.55:445/tcp",
+            "--format",
+            "json",
+        ],
+    );
+    assert_code(&out, 1);
+    let v: serde_json::Value = serde_json::from_str(&stdout(&out)).expect("sortie JSON valide");
+    assert_eq!(v["verdict"], "Denied");
+}
+
+#[test]
 fn path_sur_modele_partiel_est_non_ferme() {
     // La fixture augmentée d'une directive inconnue sur une interface :
     // fidélité partielle → aucun verdict ferme sur un chemin qui traverse
@@ -278,6 +327,41 @@ fn test_junit_contient_failure() {
     assert!(
         txt.contains("volontairement faux"),
         "le flux en échec est nommé : {txt}"
+    );
+}
+
+#[test]
+fn test_json_est_structure() {
+    let tmp = projet_importe();
+    std::fs::write(tmp.path().join("flows.yaml"), FLOWS).expect("écriture flows.yaml");
+    let out = calque(tmp.path(), &["test", "--format", "json"]);
+    assert_code(&out, 1);
+    let v: serde_json::Value = serde_json::from_str(&stdout(&out)).expect("sortie JSON valide");
+    assert_eq!(v["tests"], 3);
+    assert_eq!(v["failures"], 1);
+    let results = v["results"].as_array().expect("tableau results");
+    assert_eq!(results.len(), 3);
+    // Le flux volontairement faux est ROMPU, avec attendu/obtenu.
+    let broken = results
+        .iter()
+        .find(|r| r["status"] == "Broken")
+        .expect("un flux en échec");
+    assert_eq!(broken["expected"], "allow");
+    assert_eq!(broken["actual"], "deny");
+    assert!(
+        broken["name"]
+            .as_str()
+            .expect("nom du flux")
+            .contains("volontairement faux"),
+        "le flux en échec est nommé : {broken:?}"
+    );
+    // Les flux conformes portent leur justification (règle décisive).
+    assert!(
+        results
+            .iter()
+            .any(|r| r["status"] == "Ok"
+                && r["detail"].as_str().is_some_and(|d| d.contains("règle"))),
+        "justification présente : {results:?}"
     );
 }
 

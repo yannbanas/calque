@@ -7,8 +7,11 @@
 //!
 //! Les types d'entrée sont des « vues » construites uniquement sur
 //! `calque-model` : `calque-cli` adapte les types réels du moteur
-//! (`calque_engine::Trace`, etc.) vers ces vues. Le vocabulaire des
-//! résultats de flux (ROMPU / CORRIGÉ / NOUVEAU) est celui du §10.2.
+//! (`calque_engine::Trace`, etc.) vers ces vues. Exception : les
+//! résultats de flux (`FlowResult`/`FlowStatus`) sont produits tels quels
+//! par `calque_policy::evaluate_flow` — ils vivent là-bas et sont
+//! ré-exportés ici pour compatibilité. Le vocabulaire des résultats de
+//! flux (ROMPU / CORRIGÉ / NOUVEAU) est celui du §10.2.
 //!
 //! La sortie JUnit XML (testsuite / testcase / failure) est écrite à la
 //! main, sans dépendance supplémentaire.
@@ -314,60 +317,11 @@ pub fn format_headerset(set: &HeaderSet) -> Vec<String> {
 // Résultats de tests de flux (§10.1, vocabulaire §10.2)
 // ---------------------------------------------------------------------------
 
-/// Statut d'un flux, avec le vocabulaire du §10.2.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum FlowStatus {
-    /// Le flux se comporte comme déclaré.
-    Ok,
-    /// ROMPU — le flux ne se comporte plus comme déclaré.
-    Broken,
-    /// CORRIGÉ — le flux se comporte de nouveau comme déclaré.
-    Fixed,
-    /// NOUVEAU — une accessibilité qu'aucun flux déclaré ne couvrait.
-    New,
-}
-
-impl FlowStatus {
-    /// Préfixe affiché dans la sortie texte.
-    pub fn prefix(self) -> &'static str {
-        match self {
-            FlowStatus::Ok => "OK",
-            FlowStatus::Broken => "ROMPU",
-            FlowStatus::Fixed => "CORRIGÉ",
-            FlowStatus::New => "NOUVEAU",
-        }
-    }
-
-    /// Ce statut compte-t-il comme un échec (code de sortie non nul,
-    /// `<failure>` JUnit) ? ROMPU évidemment ; NOUVEAU aussi, car une
-    /// ouverture non déclarée est exactement le type d'erreur qui crée
-    /// une brèche de segmentation (§10.2).
-    pub fn is_failure(self) -> bool {
-        matches!(self, FlowStatus::Broken | FlowStatus::New)
-    }
-}
-
-impl fmt::Display for FlowStatus {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(self.prefix())
-    }
-}
-
-/// Le résultat d'un flux testé.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct FlowResult {
-    /// Le nom déclaré dans `flows.yaml`.
-    pub name: String,
-    /// Libellé du flux : `10.0.10.0/24 → 10.0.20.5:445/tcp`.
-    pub flow: String,
-    /// Comportement attendu (`allow` / `deny`).
-    pub expected: String,
-    /// Comportement observé sur le modèle, si le test a pu tourner.
-    pub actual: Option<String>,
-    pub status: FlowStatus,
-    /// Justification : la règle qui décide, ou la raison d'un échec.
-    pub detail: Option<String>,
-}
+// Les types `FlowResult` et `FlowStatus` vivent désormais dans
+// `calque-policy` (crate PUR), au plus près de l'évaluation qui les
+// produit (`evaluate_flow`) : les rendus ci-dessous restent ici, et les
+// ré-exports préservent la compatibilité des consommateurs existants.
+pub use calque_policy::{FlowResult, FlowStatus};
 
 /// Rendu texte des résultats de flux.
 pub fn render_flow_results_text(results: &[FlowResult]) -> String {

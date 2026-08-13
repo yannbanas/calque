@@ -167,3 +167,165 @@ pub fn all_adapters() -> Vec<Box<dyn VendorAdapter>> {
         Box::new(nftables::NftablesAdapter),
     ]
 }
+
+// ---------------------------------------------------------------------------
+// Détection + import sur `&str` (l'entrée de bibliothèque, sans I/O)
+// ---------------------------------------------------------------------------
+
+/// Le score de détection d'un adaptateur, pour les messages d'erreur :
+/// « FortiGate (CLI) : 100/100 ».
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DetectionScore {
+    /// Libellé humain de l'adaptateur ([`VendorAdapter::label`]).
+    pub adapter: &'static str,
+    pub vendor: Vendor,
+    pub confidence: Confidence,
+}
+
+/// Résumé humain d'une liste de scores :
+/// « FortiGate (CLI) : 100/100, Cisco IOS : 0/100, … ».
+pub fn score_summary(scores: &[DetectionScore]) -> String {
+    scores
+        .iter()
+        .map(|s| format!("{} : {}/100", s.adapter, s.confidence.score()))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// Ce que [`detect_and_import`] rend en cas de succès : la sortie de
+/// l'adaptateur retenu, plus l'identité de ce dernier (deux adaptateurs
+/// peuvent servir le même constructeur — l'appelant doit pouvoir dire
+/// lequel a gagné).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DetectedImport {
+    pub output: AdapterOutput,
+    pub vendor: Vendor,
+    /// Libellé humain de l'adaptateur retenu ([`VendorAdapter::label`]).
+    pub adapter: &'static str,
+}
+
+/// Pourquoi [`detect_and_import`] a échoué. Les variantes portent les
+/// données structurées (scores, diagnostics) : l'appelant peut soit
+/// afficher le `Display` français tel quel, soit reconstruire son propre
+/// message avec le contexte qu'il possède (chemin de fichier…).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DetectImportError {
+    /// Aucun adaptateur n'atteint le seuil de confiance
+    /// ([`Confidence::is_confident`]) : jamais de supposition (§6.3).
+    Unrecognized { scores: Vec<DetectionScore> },
+    /// Plusieurs adaptateurs à égalité au meilleur score : impossible de
+    /// choisir sans deviner (§6.3).
+    Ambiguous { scores: Vec<DetectionScore> },
+    /// L'adaptateur retenu n'a rendu aucun modèle (échec total :
+    /// arbre vide ou inexploitable).
+    Import {
+        vendor: Vendor,
+        /// Libellé humain de l'adaptateur retenu.
+        adapter: &'static str,
+        diagnostics: Vec<Diagnostic>,
+    },
+}
+
+impl DetectImportError {
+    /// Les scores de détection, quand l'échec vient de la détection.
+    pub fn scores(&self) -> Option<&[DetectionScore]> {
+        match self {
+            DetectImportError::Unrecognized { scores }
+            | DetectImportError::Ambiguous { scores } => Some(scores),
+            DetectImportError::Import { .. } => None,
+        }
+    }
+}
+
+impl std::fmt::Display for DetectImportError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            DetectImportError::Unrecognized { scores } => write!(
+                f,
+                "constructeur non reconnu (scores de détection : {})",
+                score_summary(scores)
+            ),
+            DetectImportError::Ambiguous { scores } => write!(
+                f,
+                "détection ambiguë (scores de détection : {})",
+                score_summary(scores)
+            ),
+            DetectImportError::Import {
+                adapter,
+                diagnostics,
+                ..
+            } => {
+                let details = diagnostics
+                    .iter()
+                    .map(|d| match &d.span {
+                        Some(span) => format!("  - {span} : {}", d.message),
+                        None => format!("  - {}", d.message),
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                write!(f, "import impossible ({adapter} détecté) :\n{details}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for DetectImportError {}
+
+/// Détecte le constructeur d'une configuration donnée en TEXTE (meilleur
+/// score [`VendorAdapter::detect`] parmi [`all_adapters`], au-dessus du
+/// seuil de confiance) et la convertit en représentation intermédiaire.
+///
+/// C'est le point d'entrée de bibliothèque de l'import : aucune
+/// entrée-sortie — le texte arrive de l'appelant (la CLI lit le fichier
+/// elle-même ; un consommateur comme Constat fournit une configuration
+/// historique). `label` est le libellé de source porté par tous les
+/// `SourceSpan` du modèle (un chemin de fichier, un identifiant
+/// d'archive…) : c'est lui qui rend chaque verdict justifiable.
+///
+/// Sélection par ADAPTATEUR, jamais par [`Vendor`] : deux adaptateurs
+/// peuvent servir le même constructeur sous deux formats (FortiGate CLI
+/// et FortiGate export YAML) — c'est le score de `detect` qui départage.
+/// Sous le seuil, ou à égalité entre plusieurs adaptateurs : erreur
+/// structurée listant les scores — jamais de supposition (§6.3).
+pub fn detect_and_import(raw: &str, label: &str) -> Result<DetectedImport, DetectImportError> {
+    let adapters = all_adapters();
+    let scores: Vec<DetectionScore> = adapters
+        .iter()
+        .map(|a| DetectionScore {
+            adapter: a.label(),
+            vendor: a.vendor(),
+            confidence: a.detect(raw),
+        })
+        .collect();
+    let best = scores
+        .iter()
+        .map(|s| s.confidence)
+        .max()
+        .unwrap_or(Confidence::NONE);
+    if !best.is_confident() {
+        return Err(DetectImportError::Unrecognized { scores });
+    }
+    let winners: Vec<usize> = scores
+        .iter()
+        .enumerate()
+        .filter(|(_, s)| s.confidence == best)
+        .map(|(i, _)| i)
+        .collect();
+    if winners.len() > 1 {
+        return Err(DetectImportError::Ambiguous { scores });
+    }
+    let adapter = &adapters[winners[0]];
+    let output =
+        adapter
+            .import_str(raw, label)
+            .map_err(|diagnostics| DetectImportError::Import {
+                vendor: adapter.vendor(),
+                adapter: adapter.label(),
+                diagnostics,
+            })?;
+    Ok(DetectedImport {
+        output,
+        vendor: adapter.vendor(),
+        adapter: adapter.label(),
+    })
+}

@@ -8,7 +8,6 @@
 //! par commande est documenté dans l'aide (`cli.rs`).
 
 use std::collections::BTreeSet;
-use std::net::IpAddr;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
@@ -17,8 +16,8 @@ use calque_model::{
     ConcretePacket, DeviceId, Endpoint, Fidelity, IfaceId, Link, LinkOrigin, Network, Severity,
     ZoneId,
 };
-use calque_policy::{EndpointSpec, Expectation, FlowSpec, FlowsFile, PortSpec, Proto};
-use calque_report::{FlowResult, FlowStatus, VerdictView};
+use calque_policy::{flow_packet, Expectation, FlowsFile, Proto};
+use calque_report::VerdictView;
 use calque_space::{Cube, HeaderSet, PortRanges, PrefixSet, ProtoSet};
 use miette::{miette, Context, IntoDiagnostic};
 
@@ -238,19 +237,11 @@ fn line_byte_range(src: &str, line: u32) -> Option<std::ops::Range<usize>> {
 // ---------------------------------------------------------------------------
 
 /// Les équipements traversés par la trace dont l'import est partiel :
-/// un verdict qui les traverse n'est pas ferme (§6.3).
+/// un verdict qui les traverse n'est pas ferme (§6.3). Délègue à
+/// `calque_policy::partial_devices_on_path`, sur la table de fidélité par
+/// équipement du projet.
 pub(crate) fn partial_devices_on_path(project: &Project, trace: &Trace) -> Vec<(DeviceId, usize)> {
-    let mut seen = BTreeSet::new();
-    let mut out = Vec::new();
-    for hop in &trace.hops {
-        if !seen.insert(hop.device.clone()) {
-            continue;
-        }
-        if let Fidelity::Partial { unsupported } = project.fidelity_of(&hop.device) {
-            out.push((hop.device.clone(), unsupported.len()));
-        }
-    }
-    out
+    calque_policy::partial_devices_on_path(trace, &project.device_fidelity)
 }
 
 /// Affiche les diagnostics accumulés par le moteur pendant la trace.
@@ -294,33 +285,42 @@ fn path(root: &Path, args: PathArgs) -> miette::Result<ExitCode> {
     let trace = backend::trace_concrete(&project.network, &packet);
     let view = backend::trace_to_view(&trace);
 
-    if args.explain {
-        print!("{}", calque_report::render_trace_text(&view));
-        if !trace.diagnostics.is_empty() {
-            println!();
-            print_trace_diagnostics(&trace);
+    match args.format {
+        // JSON : la trace complète, structurée — rien d'autre sur stdout
+        // (les avertissements texte ci-dessous ne concernent que le mode
+        // texte, les codes de sortie restent identiques, comme `reach`).
+        DataFormat::Json => println!("{}", calque_report::render_trace_json(&view)),
+        DataFormat::Text if args.explain => {
+            print!("{}", calque_report::render_trace_text(&view));
+            if !trace.diagnostics.is_empty() {
+                println!();
+                print_trace_diagnostics(&trace);
+            }
         }
-    } else {
-        println!(
-            "{} → {}:{}/{} : {}",
-            packet.src, packet.dst, packet.dport, proto, view.verdict
-        );
-        let devices: Vec<&str> = view.hops.iter().map(|h| h.device.as_str()).collect();
-        if !devices.is_empty() {
-            println!("chemin : {}", devices.join(" → "));
+        DataFormat::Text => {
+            println!(
+                "{} → {}:{}/{} : {}",
+                packet.src, packet.dst, packet.dport, proto, view.verdict
+            );
+            let devices: Vec<&str> = view.hops.iter().map(|h| h.device.as_str()).collect();
+            if !devices.is_empty() {
+                println!("chemin : {}", devices.join(" → "));
+            }
+            if let Some(rule) = deciding_rule(&view) {
+                println!("décidé par : {rule}");
+            }
+            println!("(--explain pour la trace complète, règle par règle)");
         }
-        if let Some(rule) = deciding_rule(&view) {
-            println!("décidé par : {rule}");
-        }
-        println!("(--explain pour la trace complète, règle par règle)");
     }
 
     // Verdict indéterminé : le moteur n'a pas pu conclure sans deviner.
     if matches!(view.verdict, VerdictView::Unknown) {
-        if !args.explain {
-            print_trace_diagnostics(&trace);
+        if args.format == DataFormat::Text {
+            if !args.explain {
+                print_trace_diagnostics(&trace);
+            }
+            println!("\nVerdict NON FERME (code de sortie {EXIT_NON_FIRM}).");
         }
-        println!("\nVerdict NON FERME (code de sortie {EXIT_NON_FIRM}).");
         return Ok(ExitCode::from(EXIT_NON_FIRM));
     }
 
@@ -328,15 +328,17 @@ fn path(root: &Path, args: PathArgs) -> miette::Result<ExitCode> {
     // ferme, même si le moteur a conclu sur ce que le modèle contient.
     let partial = partial_devices_on_path(&project, &trace);
     if !partial.is_empty() {
-        let list = partial
-            .iter()
-            .map(|(d, n)| format!("« {d} » ({n} directive(s) non comprise(s))"))
-            .collect::<Vec<_>>()
-            .join(", ");
-        println!(
-            "\nAttention : verdict NON FERME — le chemin traverse un modèle partiel : {list}.\n\
-             Lancez `calque model check` pour le détail (code de sortie {EXIT_NON_FIRM})."
-        );
+        if args.format == DataFormat::Text {
+            let list = partial
+                .iter()
+                .map(|(d, n)| format!("« {d} » ({n} directive(s) non comprise(s))"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            println!(
+                "\nAttention : verdict NON FERME — le chemin traverse un modèle partiel : {list}.\n\
+                 Lancez `calque model check` pour le détail (code de sortie {EXIT_NON_FIRM})."
+            );
+        }
         return Ok(ExitCode::from(EXIT_NON_FIRM));
     }
 
@@ -567,10 +569,11 @@ fn test(root: &Path, args: TestArgs) -> miette::Result<ExitCode> {
     let project = project::load(root)?;
     let flows = load_flows(&args.flows)?;
 
-    let mut results = Vec::with_capacity(flows.flows.len());
-    for flow in &flows.flows {
-        results.push(run_flow(&project, flow));
-    }
+    // L'évaluation vit dans calque-policy (`evaluate_flows`) : même
+    // préparation du modèle que `path` et `plan`, faite une fois pour
+    // toute la suite.
+    let prepared = backend::prepare_for_engine(&project.network);
+    let results = calque_policy::evaluate_flows(&prepared, &flows.flows, &project.device_fidelity);
 
     match args.format {
         OutputFormat::Text => print!("{}", calque_report::render_flow_results_text(&results)),
@@ -579,6 +582,9 @@ fn test(root: &Path, args: TestArgs) -> miette::Result<ExitCode> {
                 "{}",
                 calque_report::render_flow_results_junit("calque", &results)
             );
+        }
+        OutputFormat::Json => {
+            println!("{}", calque_report::render_flow_results_json(&results));
         }
     }
 
@@ -607,184 +613,6 @@ pub(crate) fn load_flows(path: &Path) -> miette::Result<FlowsFile> {
         return Err(miette!("{} ne déclare aucun flux", path.display()));
     }
     Ok(flows)
-}
-
-/// Résout une extrémité de flux en adresse concrète représentative :
-/// IP telle quelle ; préfixe CIDR → première adresse hôte ; nom symbolique
-/// → zone du modèle (première adresse d'hôte d'un sous-réseau d'une
-/// interface membre, hors adresse de l'interface elle-même). Échec → raison
-/// honnête, jamais une supposition.
-fn resolve_endpoint(network: &Network, e: &EndpointSpec) -> Result<IpAddr, String> {
-    match e {
-        EndpointSpec::Ip(ip) => Ok(*ip),
-        EndpointSpec::Net(net) => net
-            .hosts()
-            .next()
-            .ok_or_else(|| format!("le préfixe {net} ne contient aucune adresse hôte")),
-        EndpointSpec::Symbolic(name) => resolve_zone_sample(network, name),
-    }
-}
-
-/// Résout un nom symbolique comme zone du modèle et rend une adresse
-/// d'hôte représentative d'un sous-réseau d'une interface membre.
-fn resolve_zone_sample(network: &Network, name: &str) -> Result<IpAddr, String> {
-    let zone = ZoneId::new(name);
-    let mut hits: Vec<(&calque_model::Device, &Vec<calque_model::IfaceId>)> = network
-        .devices
-        .values()
-        .filter_map(|d| d.zones.get(&zone).map(|members| (d, members)))
-        .collect();
-    let (device, members) = match hits.len() {
-        0 => return Err(format!("« {name} » ne correspond à aucune zone du modèle")),
-        1 => hits.pop().expect("hits.len() == 1"),
-        _ => {
-            let list = hits
-                .iter()
-                .map(|(d, _)| format!("« {} »", d.id))
-                .collect::<Vec<_>>()
-                .join(", ");
-            return Err(format!(
-                "la zone « {name} » existe sur plusieurs équipements ({list}) : ambigu"
-            ));
-        }
-    };
-    for member in members {
-        let Some(iface) = device.interfaces.get(member) else {
-            continue;
-        };
-        for addr in &iface.addrs {
-            // La première adresse d'hôte du sous-réseau qui n'est pas
-            // l'adresse de l'interface : elle représente un hôte de la
-            // zone, pas la passerelle.
-            if let Some(host) = addr.hosts().find(|h| *h != addr.addr()) {
-                return Ok(host);
-            }
-        }
-    }
-    Err(format!(
-        "la zone « {name} » (équipement « {} ») n'a aucun sous-réseau exploitable",
-        device.id
-    ))
-}
-
-/// Construit le paquet concret représentatif d'un flux déclaré : les
-/// extrémités sont résolues (voir [`resolve_endpoint`]) et `port: any`
-/// devient un paquet représentatif 80/tcp (avec une note ; la couverture
-/// complète de l'intervalle arrive avec le mode symbolique, S6).
-pub(crate) fn flow_packet(
-    network: &Network,
-    flow: &FlowSpec,
-) -> Result<(ConcretePacket, Option<String>), String> {
-    let src = resolve_endpoint(network, &flow.from)?;
-    let dst = resolve_endpoint(network, &flow.to)?;
-    let (proto, dport, port_note) = match flow.port {
-        PortSpec::One { port, proto } => (proto.number(), port, None),
-        PortSpec::Any => (
-            6,
-            80,
-            Some(
-                "port « any » testé avec un paquet représentatif 80/tcp \
-                 (couverture complète au mode symbolique)"
-                    .to_owned(),
-            ),
-        ),
-    };
-    Ok((
-        ConcretePacket {
-            src,
-            dst,
-            proto,
-            sport: backend::EPHEMERAL_SPORT,
-            dport,
-        },
-        port_note,
-    ))
-}
-
-/// Exécute un flux déclaré contre le modèle. Un flux qui ne se comporte
-/// pas comme déclaré — ou qu'on ne peut pas évaluer sans deviner — rend
-/// un `FlowResult` en échec, jamais une erreur fatale.
-fn run_flow(project: &Project, flow: &FlowSpec) -> FlowResult {
-    let broken = |actual: Option<String>, detail: String| FlowResult {
-        name: flow.name.clone(),
-        flow: flow.flow_label(),
-        expected: flow.expect.to_string(),
-        actual,
-        status: FlowStatus::Broken,
-        detail: Some(detail),
-    };
-
-    // Résolution des extrémités (documentée dans l'aide de `calque test`).
-    let (packet, port_note) = match flow_packet(&project.network, flow) {
-        Ok(x) => x,
-        Err(reason) => {
-            return broken(
-                None,
-                format!("extrémité non résolue : {reason} — flux compté en échec (§6.3)"),
-            )
-        }
-    };
-    let trace = backend::trace_concrete(&project.network, &packet);
-    let view = backend::trace_to_view(&trace);
-
-    // §6.3 : chemin traversant un import partiel → pas de verdict ferme,
-    // le flux est compté en échec avec la raison.
-    let partial = partial_devices_on_path(project, &trace);
-    if !partial.is_empty() {
-        let list = partial
-            .iter()
-            .map(|(d, _)| format!("« {d} »"))
-            .collect::<Vec<_>>()
-            .join(", ");
-        return broken(
-            None,
-            format!(
-                "verdict non ferme : le chemin traverse un modèle partiel ({list}) — \
-                 lancez `calque model check` (§6.3)"
-            ),
-        );
-    }
-
-    let actual = match view.verdict {
-        VerdictView::Allowed => "allow",
-        VerdictView::Denied | VerdictView::NoRoute | VerdictView::Loop => "deny",
-        VerdictView::Unknown => "unknown",
-    };
-    let as_declared = actual == flow.expect.as_str();
-    let status = if as_declared && !matches!(view.verdict, VerdictView::Unknown) {
-        FlowStatus::Ok
-    } else {
-        FlowStatus::Broken
-    };
-
-    let mut detail = deciding_rule(&view);
-    if matches!(view.verdict, VerdictView::Unknown) {
-        let reasons = trace
-            .diagnostics
-            .iter()
-            .map(|d| d.message.clone())
-            .collect::<Vec<_>>()
-            .join(" ; ");
-        detail = Some(match detail {
-            Some(d) => format!("{d}\n          {reasons}"),
-            None => reasons,
-        });
-    }
-    if let Some(note) = port_note {
-        detail = Some(match detail {
-            Some(d) => format!("{d}\n          {note}"),
-            None => note,
-        });
-    }
-
-    FlowResult {
-        name: flow.name.clone(),
-        flow: flow.flow_label(),
-        expected: flow.expect.to_string(),
-        actual: Some(actual.to_owned()),
-        status,
-        detail,
-    }
 }
 
 /// La justification du verdict : la dernière décision portée par une règle.

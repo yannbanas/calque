@@ -5,21 +5,24 @@
 
 use std::path::Path;
 
-use calque_engine::{DeadRule, DeadRuleKind, Outcome, ReachReport, Stage, Trace, Verdict};
+use calque_engine::{DeadRule, DeadRuleKind, ReachReport, Stage, Trace, Verdict};
 use calque_model::{ConcretePacket, Device, DeviceId, Diagnostic, Fidelity, Network, Vendor};
 use calque_report::{
     DeadRuleKindView, DeadRuleView, DeadRulesView, DecisionView, HopView, MaskerView,
     ReachDecisionView, ReachFlowView, ReachView, StageView, TraceView, VerdictView,
 };
-use calque_vendors::{all_adapters, Confidence};
+use calque_vendors::{detect_and_import, DetectImportError};
 use miette::{miette, IntoDiagnostic, WrapErr};
 
-/// Le port source utilisé pour construire un paquet concret quand
-/// l'utilisateur n'en précise pas : un port éphémère représentatif
-/// (40000, dans l'intervalle éphémère de fait de la plupart des piles).
-/// Le mode symbolique couvrira tout l'intervalle ; en mode concret, un
-/// paquet précis suffit et ce choix est affiché tel quel dans la trace.
-pub const EPHEMERAL_SPORT: u16 = 40000;
+// Le port source éphémère représentatif vit désormais dans
+// `calque-policy` (à côté de `flow_packet`, qui le pose) ; ré-exporté ici
+// pour les consommateurs du binaire.
+pub use calque_policy::EPHEMERAL_SPORT;
+
+// La préparation du modèle pour le moteur vit désormais dans
+// `calque-engine` (API publique de la jonction bibliothèque) ; ré-exportée
+// ici pour que la CLI garde son point d'accès historique.
+pub use calque_engine::prepare_for_engine;
 
 // ---------------------------------------------------------------------------
 // Bornes de lecture (audit 2026-08-12, finding R1)
@@ -105,70 +108,55 @@ pub fn vendor_label(v: Vendor) -> &'static str {
     }
 }
 
-/// Détecte le constructeur d'un fichier de configuration (meilleur score
-/// `detect` parmi `all_adapters()`, au-dessus du seuil de confiance) et le
-/// convertit en représentation intermédiaire.
+/// Détecte le constructeur d'un fichier de configuration et le convertit
+/// en représentation intermédiaire. La détection et la conversion vivent
+/// dans `calque-vendors` ([`calque_vendors::detect_and_import`], sans
+/// I/O) : ici on lit le fichier (borné), puis on habille les erreurs
+/// structurées en messages miette portant le chemin.
 ///
-/// Sous le seuil, ou à égalité entre plusieurs constructeurs : erreur
-/// claire listant les scores — jamais de supposition (§6.3).
+/// Sous le seuil de confiance, ou à égalité entre plusieurs adaptateurs :
+/// erreur claire listant les scores — jamais de supposition (§6.3).
 pub fn import_config(path: &Path, name: Option<&str>) -> miette::Result<ImportOutcome> {
     let raw = read_bounded(path, MAX_CONFIG_BYTES, "une configuration")?;
     // Le libellé de fichier porté par tous les SourceSpan du modèle : le
     // chemin tel que donné, pour que `model check` puisse relire la source.
     let label = path.display().to_string();
 
-    // Sélection par ADAPTATEUR, jamais par `Vendor` : deux adaptateurs
-    // peuvent servir le même constructeur sous deux formats (FortiGate CLI
-    // et FortiGate export YAML) — c'est le score de `detect` qui départage.
-    let adapters = all_adapters();
-    let scores: Vec<Confidence> = adapters.iter().map(|a| a.detect(&raw)).collect();
-    let score_list = adapters
-        .iter()
-        .zip(&scores)
-        .map(|(a, c)| format!("{} : {}/100", a.label(), c.score()))
-        .collect::<Vec<_>>()
-        .join(", ");
-    let best = scores.iter().copied().max().unwrap_or(Confidence::NONE);
-    if !best.is_confident() {
-        return Err(miette!(
+    let detected = detect_and_import(&raw, &label).map_err(|e| match &e {
+        DetectImportError::Unrecognized { scores } => miette!(
             help = "aucun adaptateur ne reconnaît ce format avec assez de confiance (seuil : 60/100) ; vérifiez que le fichier est bien une configuration exportée d'un constructeur géré",
-            "constructeur non reconnu pour « {} » (scores de détection : {score_list})",
-            path.display()
-        ));
-    }
-    let winners: Vec<usize> = scores
-        .iter()
-        .enumerate()
-        .filter(|(_, c)| **c == best)
-        .map(|(i, _)| i)
-        .collect();
-    if winners.len() > 1 {
-        return Err(miette!(
-            help = "plusieurs adaptateurs obtiennent le même score : impossible de choisir sans deviner (§6.3)",
-            "détection ambiguë pour « {} » (scores de détection : {score_list})",
-            path.display()
-        ));
-    }
-    let adapter = &adapters[winners[0]];
-    let vendor = adapter.vendor();
-
-    let output = adapter.import_str(&raw, &label);
-    let mut output = output.map_err(|diags| {
-        let details = diags
-            .iter()
-            .map(|d| match &d.span {
-                Some(span) => format!("  - {span} : {}", d.message),
-                None => format!("  - {}", d.message),
-            })
-            .collect::<Vec<_>>()
-            .join("\n");
-        miette!(
-            "import de « {} » impossible ({} détecté) :\n{details}",
+            "constructeur non reconnu pour « {} » (scores de détection : {})",
             path.display(),
-            vendor_label(vendor)
-        )
+            calque_vendors::score_summary(scores)
+        ),
+        DetectImportError::Ambiguous { scores } => miette!(
+            help = "plusieurs adaptateurs obtiennent le même score : impossible de choisir sans deviner (§6.3)",
+            "détection ambiguë pour « {} » (scores de détection : {})",
+            path.display(),
+            calque_vendors::score_summary(scores)
+        ),
+        DetectImportError::Import {
+            vendor,
+            diagnostics,
+            ..
+        } => {
+            let details = diagnostics
+                .iter()
+                .map(|d| match &d.span {
+                    Some(span) => format!("  - {span} : {}", d.message),
+                    None => format!("  - {}", d.message),
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            miette!(
+                "import de « {} » impossible ({} détecté) :\n{details}",
+                path.display(),
+                vendor_label(*vendor)
+            )
+        }
     })?;
 
+    let mut output = detected.output;
     if let Some(name) = name {
         output.device.id = DeviceId::new(name);
     }
@@ -176,7 +164,7 @@ pub fn import_config(path: &Path, name: Option<&str>) -> miette::Result<ImportOu
         device: output.device,
         fidelity: output.fidelity,
         notes: output.notes,
-        vendor,
+        vendor: detected.vendor,
     })
 }
 
@@ -187,46 +175,6 @@ pub fn import_config(path: &Path, name: Option<&str>) -> miette::Result<ImportOu
 pub fn trace_concrete(network: &Network, packet: &ConcretePacket) -> Trace {
     let prepared = prepare_for_engine(network);
     calque_engine::trace_packet(&prepared, packet)
-}
-
-/// Choix documenté — accrochage des politiques à couple de zones.
-///
-/// L'adaptateur FortiGate accroche la politique `forward` en entrée
-/// (`Pipeline::ingress`), mais ses règles contraignent un couple de zones
-/// (`from`, `to`). Or la zone de SORTIE n'est connue qu'après la décision
-/// de routage : le moteur, qui ne devine jamais, refuse d'évaluer une
-/// contrainte `to` au point d'entrée (`EgressZoneUnknownAtIngress`).
-///
-/// Sur l'équipement réel, la politique forward est bel et bien consultée
-/// APRÈS la recherche de route (la décision dépend de l'interface de
-/// sortie). Évaluer ces politiques au point de sortie — où le moteur
-/// conserve la zone d'entrée ET connaît la zone de sortie — reproduit donc
-/// exactement la sémantique constructeur, sans rien supposer. On déplace
-/// ici, sur une COPIE du modèle et uniquement pour l'évaluation, toute
-/// politique d'entrée dont au moins une règle contraint la zone de sortie.
-///
-/// Publique parce que `calque plan` doit passer par la même préparation
-/// avant de confier les deux modèles à `calque_diff::plan`.
-pub fn prepare_for_engine(network: &Network) -> Network {
-    let mut network = network.clone();
-    for device in network.devices.values_mut() {
-        let (to_egress, keep_ingress): (Vec<_>, Vec<_>) =
-            device.pipeline.ingress.drain(..).partition(|pid| {
-                device
-                    .policies
-                    .get(pid)
-                    .is_some_and(|p| p.rules.iter().any(|r| r.to.is_some()))
-            });
-        device.pipeline.ingress = keep_ingress;
-        if !to_egress.is_empty() {
-            // Elles passaient avant les politiques de sortie existantes :
-            // elles restent devant.
-            let mut egress = to_egress;
-            egress.append(&mut device.pipeline.egress);
-            device.pipeline.egress = egress;
-        }
-    }
-    network
 }
 
 // ---------------------------------------------------------------------------
@@ -259,7 +207,7 @@ pub fn decision_view(d: &calque_engine::Decision) -> DecisionView {
         stage: stage_view(d.stage),
         rule: d.rule.as_ref().map(|r| r.to_string()),
         source: d.source.clone(),
-        outcome: outcome_label(d.outcome).to_owned(),
+        outcome: d.outcome.label().to_owned(),
         shadowed_by: d.shadowed_by.iter().map(|r| r.to_string()).collect(),
     }
 }
@@ -355,19 +303,5 @@ fn stage_view(s: Stage) -> StageView {
         Stage::Nat => StageView::Nat,
         Stage::Route => StageView::Route,
         Stage::EgressFilter => StageView::EgressFilter,
-    }
-}
-
-fn outcome_label(o: Outcome) -> &'static str {
-    match o {
-        Outcome::Accepted => "accepté",
-        Outcome::Denied => "refusé",
-        Outcome::Matched => "correspond aussi",
-        Outcome::NoMatch => "aucune correspondance",
-        Outcome::DefaultAction => "action par défaut de la politique",
-        Outcome::RouteFound => "route retenue",
-        Outcome::NoRoute => "aucune route vers la destination",
-        Outcome::RouteDrop => "route de rejet explicite",
-        Outcome::Rewritten => "en-tête réécrit",
     }
 }

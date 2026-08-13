@@ -140,6 +140,11 @@ pub struct PathArgs {
     /// Afficher la trace complète, règle par règle
     #[arg(long)]
     pub explain: bool,
+
+    /// Format de sortie (json : la trace complète, structurée ; --explain
+    /// est alors sans effet)
+    #[arg(long, value_enum, default_value_t = DataFormat::Text)]
+    pub format: DataFormat,
 }
 
 #[derive(Debug, clap::Args)]
@@ -221,6 +226,8 @@ pub enum OutputFormat {
     Text,
     /// JUnit XML, pour l'intégration continue
     Junit,
+    /// JSON, pour les programmes
+    Json,
 }
 
 #[derive(Debug, clap::Args)]

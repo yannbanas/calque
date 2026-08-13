@@ -17,8 +17,18 @@
 //!
 //! `from` et `to` acceptent une adresse IP, un préfixe CIDR, ou un nom
 //! symbolique (`vlan-invite`, `groupe:commutateurs`). Les noms symboliques
-//! sont gardés en chaîne NON RÉSOLUE pour l'instant : la résolution vers
-//! des préfixes concrets (zones, groupes d'objets) arrivera avec le moteur.
+//! sont gardés en chaîne NON RÉSOLUE dans le fichier ; leur résolution
+//! contre le modèle et l'évaluation des flux (la brique de `calque test`)
+//! vivent dans le module [`eval`] : [`evaluate_flow`], [`evaluate_flows`],
+//! [`flow_packet`], et les types de résultat [`FlowResult`] /
+//! [`FlowStatus`] (ré-exportés par `calque-report` pour compatibilité).
+
+pub mod eval;
+
+pub use eval::{
+    evaluate_flow, evaluate_flows, flow_packet, partial_devices_on_path, FlowResult, FlowStatus,
+    EPHEMERAL_SPORT,
+};
 
 use std::fmt;
 use std::net::IpAddr;

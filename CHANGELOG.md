@@ -9,6 +9,53 @@ majeur.
 
 Rien pour l'instant.
 
+## [0.3.0] — 2026-08-13
+
+La jonction bibliothèque : tout le chemin « texte de configuration →
+modèle → verdict » devient une API publique sans I/O, consommable par un
+programme tiers (Constat épingle cette version en dépendance git).
+Décision documentée dans [ADR 002](docs/adr/002-jonction-bibliotheque.md).
+La ligne de commande reste fonctionnellement identique.
+
+### Ajouté
+
+- **`calque_vendors::detect_and_import(raw: &str, label: &str)`** :
+  détection automatique du constructeur par score de confiance + import,
+  sur du texte fourni par l'appelant (aucune lecture de fichier). Erreurs
+  structurées (`DetectImportError` : scores de détection, diagnostics) —
+  jamais de supposition sous le seuil ou à égalité (§6.3). La CLI lit le
+  fichier elle-même et réutilise cette fonction.
+- **`calque_engine::prepare_for_engine`** : la préparation du modèle
+  pour le moteur (évaluation des politiques à couple de zones au point
+  de sortie — sémantique forward FortiGate) remonte du binaire dans le
+  moteur, en API publique documentée, idempotente.
+- **`calque_policy::{evaluate_flow, evaluate_flows, flow_packet}`** :
+  l'évaluation des flux déclarés (la brique de `calque test`) remonte
+  dans `calque-policy`, qui gagne sa dépendance prévue vers
+  `calque-engine`. Le refus de verdict ferme sur un chemin traversant un
+  import partiel (§6.3) vit dans la bibliothèque — la fidélité par
+  équipement est un paramètre, l'honnêteté ne se contourne pas. La
+  rustdoc de `evaluate_flow` montre le chemin complet :
+  `detect_and_import` → `Network` (+ `prepare_for_engine` +
+  `infer_links_from_subnets`) → `evaluate_flow` → `FlowResult`.
+- **`--format json` sur `calque path` et `calque test`** : la trace
+  complète structurée pour `path` (les avertissements texte restent au
+  mode texte, les codes de sortie sont inchangés), les résultats de flux
+  avec décompte (`tests`/`failures`) pour `test`.
+- Libellés français des étapes et issues de trace dans `calque-engine`
+  (`Stage::label`, `Outcome::label`, `Display`) : la justification d'un
+  verdict est identique des deux côtés de la jonction.
+
+### Modifié
+
+- `FlowResult`/`FlowStatus` vivent désormais dans `calque-policy` (crate
+  pur, au plus près de `evaluate_flow` qui les produit) ;
+  `calque-report` les ré-exporte — les consommateurs existants compilent
+  sans changement. En contrepartie, `calque-report` dépend de
+  `calque-policy` (et transitivement du moteur).
+- `calque test` prépare le modèle une fois pour toute la suite au lieu
+  d'une fois par flux — sorties et codes de sortie inchangés.
+
 ## [0.2.0] — 2026-08-13
 
 ### Ajouté
@@ -107,6 +154,7 @@ sur des configurations de production.
 - Pas éprouvé sur des configurations de production ; les retours de
   terrain sont bienvenus.
 
-[Unreleased]: https://github.com/yannbanas/calque/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/yannbanas/calque/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/yannbanas/calque/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/yannbanas/calque/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/yannbanas/calque/releases/tag/v0.1.0

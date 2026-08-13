@@ -424,7 +424,7 @@ pub fn verify(root: &Path, args: VerifyArgs) -> miette::Result<ExitCode> {
         }
 
         // Le verdict du MODÈLE, exactement comme `calque test`.
-        let (packet, _) = match commands::flow_packet(&project.network, flow) {
+        let (packet, _) = match calque_policy::flow_packet(&project.network, flow) {
             Ok(x) => x,
             Err(reason) => {
                 untestable += 1;

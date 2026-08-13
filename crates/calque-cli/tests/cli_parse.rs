@@ -1,6 +1,6 @@
 //! Tests d'intégration du parsing clap (§10).
 
-use calque_cli::cli::{Cli, Command, ModelCommand, OutputFormat, TopologyCommand};
+use calque_cli::cli::{Cli, Command, DataFormat, ModelCommand, OutputFormat, TopologyCommand};
 use clap::Parser;
 
 #[test]
@@ -63,7 +63,26 @@ fn path_avec_explain() {
             assert_eq!(args.arrow, "->");
             assert_eq!(args.dst, "10.0.20.10:445/tcp");
             assert!(args.explain);
+            assert_eq!(args.format, DataFormat::Text);
         }
+        other => panic!("commande inattendue : {other:?}"),
+    }
+}
+
+#[test]
+fn path_format_json() {
+    let cli = Cli::try_parse_from([
+        "calque",
+        "path",
+        "10.0.10.5",
+        "->",
+        "10.0.20.10:445/tcp",
+        "--format",
+        "json",
+    ])
+    .unwrap();
+    match cli.command {
+        Command::Path(args) => assert_eq!(args.format, DataFormat::Json),
         other => panic!("commande inattendue : {other:?}"),
     }
 }
@@ -82,6 +101,12 @@ fn test_par_defaut_et_junit() {
     let cli = Cli::try_parse_from(["calque", "test", "--format", "junit"]).unwrap();
     match cli.command {
         Command::Test(args) => assert_eq!(args.format, OutputFormat::Junit),
+        other => panic!("commande inattendue : {other:?}"),
+    }
+
+    let cli = Cli::try_parse_from(["calque", "test", "--format", "json"]).unwrap();
+    match cli.command {
+        Command::Test(args) => assert_eq!(args.format, OutputFormat::Json),
         other => panic!("commande inattendue : {other:?}"),
     }
 }

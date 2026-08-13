@@ -27,6 +27,7 @@ pub mod dead;
 pub mod engine;
 pub mod error;
 pub mod policy;
+pub mod prepare;
 pub mod reach;
 pub mod resolve;
 pub mod route;
@@ -45,6 +46,7 @@ pub use dead::{
 pub use engine::{trace_packet, trace_packet_from};
 pub use error::EvalError;
 pub use policy::{evaluate_policy, FilterPoint, FilterResult, NatGrant, PolicyEvaluation};
+pub use prepare::prepare_for_engine;
 pub use reach::{reach_from, reach_to, ReachFlow, ReachReport};
 pub use resolve::packet_matches_rule;
 pub use route::{lookup_route, RouteDecision};
