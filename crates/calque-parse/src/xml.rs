@@ -270,7 +270,7 @@ fn element_node(
         })?;
         let key = String::from_utf8_lossy(attr.key.as_ref()).into_owned();
         let value = attr
-            .unescape_value()
+            .normalized_value(quick_xml::XmlVersion::default())
             .map_err(|e| ParseError::MalformedXml {
                 file: filename.to_owned(),
                 line: lines.line_of(offset_of(reader)),
