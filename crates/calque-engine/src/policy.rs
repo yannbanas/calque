@@ -433,7 +433,7 @@ mod tests {
         let ev = run_policy(&policy);
         assert_eq!(ev.result, FilterResult::Deny);
         assert_eq!(
-            ev.decisions.last().map(|d| d.outcome),
+            ev.decisions.last().map(|d| d.outcome.clone()),
             Some(Outcome::DefaultAction)
         );
         assert_eq!(ev.decisions.last().and_then(|d| d.rule.clone()), None);

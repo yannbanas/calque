@@ -474,7 +474,7 @@ mod tests {
         let p = part_for(&parts, &tcp("10.0.10.5", "10.0.30.5", 445));
         assert_eq!(p.result, SymFilterResult::Deny);
         assert_eq!(
-            p.decisions.last().map(|d| d.outcome),
+            p.decisions.last().map(|d| d.outcome.clone()),
             Some(Outcome::DefaultAction)
         );
     }
@@ -537,7 +537,7 @@ mod tests {
         let deny = part_for(&parts, &tcp("10.0.10.5", "10.0.20.9", 80));
         assert_eq!(deny.result, SymFilterResult::Deny);
         assert_eq!(
-            deny.decisions.last().map(|d| d.outcome),
+            deny.decisions.last().map(|d| d.outcome.clone()),
             Some(Outcome::DefaultAction)
         );
     }

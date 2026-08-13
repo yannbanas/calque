@@ -85,6 +85,33 @@ pub fn parse_port_token(token: &str) -> Option<(PortRange, PortRange)> {
     Some((dst, src))
 }
 
+/// Une adresse IPv4 seule (`10.0.0.1`) ou une plage `a-b`
+/// (`10.0.0.1-10.0.0.5`, forme des `extip`/`mappedip` FortiGate) →
+/// `(début, fin)` inclusif ; une adresse seule rend `(a, a)`. Rend `None`
+/// si une borne est invalide ou si la plage est inversée.
+pub fn parse_ip_span(s: &str) -> Option<(Ipv4Addr, Ipv4Addr)> {
+    match s.split_once('-') {
+        Some((a, b)) => {
+            let start: Ipv4Addr = a.trim().parse().ok()?;
+            let end: Ipv4Addr = b.trim().parse().ok()?;
+            (u32::from(start) <= u32::from(end)).then_some((start, end))
+        }
+        None => {
+            let addr: Ipv4Addr = s.trim().parse().ok()?;
+            Some((addr, addr))
+        }
+    }
+}
+
+/// Un port seul (`443`) ou une plage `a-b` (`8000-8010`, forme des
+/// `extport`/`mappedport` FortiGate) → `(début, fin)` inclusif ; un port
+/// seul rend `(p, p)`. Rend `None` si un nombre est invalide ou si la
+/// plage est inversée.
+pub fn parse_port_span(s: &str) -> Option<(u16, u16)> {
+    let range = parse_range(s)?;
+    Some((range.start, range.end))
+}
+
 /// `445` ou `8000-8010` → `PortRange`. Rend `None` si la borne basse
 /// dépasse la borne haute ou si un nombre est invalide.
 fn parse_range(s: &str) -> Option<PortRange> {
@@ -160,6 +187,29 @@ mod tests {
         );
         assert_eq!(nets.len(), 1);
         assert_eq!(nets[0].to_string(), "0.0.0.0/0");
+    }
+
+    #[test]
+    fn adresses_seules_et_plages() {
+        let un = "10.0.0.7".parse::<Ipv4Addr>().unwrap();
+        assert_eq!(parse_ip_span("10.0.0.7"), Some((un, un)));
+        assert_eq!(
+            parse_ip_span("10.0.0.1-10.0.0.5"),
+            Some(("10.0.0.1".parse().unwrap(), "10.0.0.5".parse().unwrap()))
+        );
+        // Plage inversée, borne invalide : on ne devine pas.
+        assert_eq!(parse_ip_span("10.0.0.9-10.0.0.1"), None);
+        assert_eq!(parse_ip_span("10.0.0.999"), None);
+        assert_eq!(parse_ip_span(""), None);
+    }
+
+    #[test]
+    fn ports_seuls_et_plages() {
+        assert_eq!(parse_port_span("443"), Some((443, 443)));
+        assert_eq!(parse_port_span("8000-8010"), Some((8000, 8010)));
+        assert_eq!(parse_port_span("10-5"), None);
+        assert_eq!(parse_port_span("70000"), None);
+        assert_eq!(parse_port_span("abc"), None);
     }
 
     #[test]

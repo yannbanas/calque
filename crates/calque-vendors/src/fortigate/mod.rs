@@ -27,6 +27,46 @@
 //!   `Action::Nat(NatAction { snat: None, dnat: None })` : « accepte et
 //!   traduit la source, cible résolue tardivement ».
 //!
+//! - **`config firewall vip` / `vipgrp`.** Un VIP compris devient un
+//!   objet adresse `Nets([extip/32])` sous son nom, et toute règle qui
+//!   l'ACCEPTE en `dstaddr` porte la redirection :
+//!   `Action::Nat(NatAction { dnat: Some(…) })`, fusionnée avec la part
+//!   de SNAT d'un éventuel `set nat enable`. Un port unique est mappé
+//!   exactement (`extport` → `mappedport`) ; une plage de ports
+//!   IDENTITAIRE devient un DNAT d'adresse seule (ports préservés) ; une
+//!   plage réellement décalée ou une plage d'adresses externes n'est PAS
+//!   représentable (`DnatTarget` porte une adresse et un port uniques) →
+//!   diagnostic, jamais une approximation. Plusieurs VIP dans une même
+//!   règle (ou via un `vipgrp`) ont chacun leur cible : la règle est
+//!   ÉCLATÉE en une règle par VIP (identifiants suffixés `<n>:<vip>`,
+//!   même span — exact et traçable). `set extintf` est compris et sans
+//!   effet propre : la contrainte d'interface d'entrée est déjà portée
+//!   par le `srcintf` des politiques référençant le VIP.
+//!
+//! - **Routes par objet** (`set dstaddr` sur une route statique) :
+//!   l'objet (subnet, iprange, groupe) est résolu en UNE route par
+//!   préfixe (mêmes saut, métrique et span). Objet irrésoluble (fqdn,
+//!   géographie…) → diagnostic, pas de route devinée.
+//!
+//! - **`config system sdwan`.** Une route `set sdwan-zone <Z>` devient
+//!   UNE route par membre actif de la zone (même préfixe, même
+//!   métrique) : le moteur les traite en candidates ECMP évaluées par
+//!   branches — « l'un des WAN », c'est le comportement voulu. Les
+//!   `config service` SD-WAN (sélection de membre par flux) ne sont PAS
+//!   modélisés → diagnostic Warning explicite (fidélité dégradée) ; les
+//!   `health-check` (supervision) → note Info.
+//!
+//! - **`config vpn ipsec phase1/phase2-interface`.** La phase1 est de la
+//!   topologie (passerelle distante, interface parente) → note Info ;
+//!   l'interface tunnel du même nom vient de `config system interface`.
+//!   Les SÉLECTEURS phase2 sont un vrai filtre : le FortiGate ne chiffre
+//!   que le trafic correspondant à un sélecteur et JETTE le reste →
+//!   politique de SORTIE `ipsec:<tunnel>` (une règle Accept par
+//!   sélecteur, zone `to` = l'interface tunnel, `default_action = Deny`).
+//!   Chiffrement et négociation (`proposal`, `dhgrp`, `psksecret`…) sont
+//!   compris et sans effet sur le filtrage ; la valeur de `psksecret` ne
+//!   sort JAMAIS dans un diagnostic (§11.4).
+//!
 //! - **Règles désactivées** (`set status disable`) : ignorées AVEC un
 //!   diagnostic `Info` dans `AdapterOutput::notes` — c'est un constat,
 //!   pas une incompréhension, donc la fidélité n'est pas dégradée.

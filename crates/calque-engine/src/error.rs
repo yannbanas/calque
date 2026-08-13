@@ -35,9 +35,15 @@ pub enum EvalError {
         rule: Option<RuleId>,
         source: Option<SourceSpan>,
     },
-    /// Plusieurs routes optimales divergentes (ECMP) : indéterminable en
-    /// mode concret sans deviner.
-    AmbiguousRoutes { dst: IpAddr, prefix: IpNet },
+    /// Plus de routes optimales divergentes (ECMP) que la borne d'évaluation
+    /// par branches ([`crate::route::MAX_ECMP_ROUTES`]) : au-delà, le moteur
+    /// refuse d'évaluer (verdict `Unknown`) plutôt que de deviner ou de
+    /// tronquer silencieusement.
+    EcmpTooWide {
+        dst: IpAddr,
+        prefix: IpNet,
+        count: usize,
+    },
     /// Incohérence du modèle empêchant de poursuivre (interface absente,
     /// prochain saut injoignable…).
     Inconsistent {
@@ -108,10 +114,11 @@ impl std::fmt::Display for EvalError {
                 ),
                 None => write!(f, "DNAT demandé après la décision de routage"),
             },
-            EvalError::AmbiguousRoutes { dst, prefix } => write!(
+            EvalError::EcmpTooWide { dst, prefix, count } => write!(
                 f,
-                "routes multiples et divergentes vers {dst} (préfixe {prefix}) : \
-                 indéterminable en mode concret"
+                "{count} routes optimales divergentes vers {dst} (préfixe {prefix}) : \
+                 au-delà de la borne de {} branches évaluées, verdict indéterminé",
+                crate::route::MAX_ECMP_ROUTES
             ),
             EvalError::Inconsistent { message, .. } => f.write_str(message),
         }

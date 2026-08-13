@@ -10,9 +10,27 @@
 //! représentatif (`sample()`, §4.1).
 //!
 //! Fidélité (§6.3) : toute part que le modèle ne permet pas de décider
-//! (objet manquant, cycle, topologie incomplète ou ambiguë, ECMP divergent,
-//! borne atteinte) reçoit le verdict `Unknown` avec un diagnostic — jamais
-//! une supposition.
+//! (objet manquant, cycle, topologie incomplète ou ambiguë, borne atteinte)
+//! reçoit le verdict `Unknown` avec un diagnostic — jamais une supposition.
+//! Mais le moteur répond FERMEMENT quand le périmètre modélisé le permet
+//! (même sémantique que le moteur concret, `engine.rs`) :
+//!
+//! - SORTIE DE PÉRIMÈTRE : une part routée par une interface SANS lien vers
+//!   des destinations qui n'appartiennent à AUCUN réseau du modèle devient
+//!   un ensemble terminal `Allowed` avec la décision `Outcome::ExitsModel`
+//!   (le critère précis est celui d'`engine.rs`). Les destinations couvertes
+//!   par un réseau modélisé mais injoignables restent un trou de topologie
+//!   interne → `Unknown`. `reach_to`/`reach_from` en bénéficient : une cible
+//!   externe au modèle devient atteignable « en sortie de périmètre ».
+//! - ECMP : chaque route candidate est évaluée comme une branche complète ;
+//!   pour chaque sous-ensemble, le verdict est FERME là où toutes les
+//!   branches s'accordent (intersection des unions par verdict), et
+//!   `Unknown` diagnostiqué là où elles divergent. Limite documentée : si
+//!   une branche applique une traduction d'adresse après l'embranchement,
+//!   la comparaison inter-branches (exprimée après traduction) n'est plus
+//!   fiable → toute la part devient `Unknown` (prudent, jamais un verdict
+//!   ferme erroné). Bornes : [`crate::route::MAX_ECMP_ROUTES`] par
+//!   recherche, [`crate::engine::MAX_ECMP_TOTAL_BRANCHES`] en cumulé.
 //!
 //! NAT symbolique — limites documentées :
 //! - un DNAT réécrit la dimension destination en SINGLETON (adresse cible,
@@ -41,8 +59,10 @@ use calque_space::{Cube, HeaderSet, HeaderSpace, PortRanges, PrefixSet, ProtoSet
 use ipnet::IpNet;
 use serde::{Deserialize, Serialize};
 
+use crate::engine::MAX_ECMP_TOTAL_BRANCHES;
 use crate::error::EvalError;
 use crate::policy::{FilterPoint, NatGrant};
+use crate::route::{EcmpRoute, MAX_ECMP_ROUTES};
 use crate::sympolicy::{evaluate_policy_symbolic, SymFilterResult, MAX_CUBES};
 use crate::trace::{Decision, Outcome, Stage, Verdict};
 
@@ -173,6 +193,8 @@ pub fn symbolic_trace_from(network: &Network, entry: &Endpoint, set: &HeaderSet)
     let mut walker = Walker {
         network,
         nodes_left: MAX_NODES,
+        ecmp_budget: MAX_ECMP_TOTAL_BRANCHES,
+        model_nets: model_networks(network),
     };
     let root = walker.propagate(
         &entry.device,
@@ -214,12 +236,18 @@ struct DeviceCtx<'a> {
 enum RouteKind {
     Forward {
         out_iface: IfaceId,
+        gateway: Option<IpAddr>,
         source: Option<SourceSpan>,
+    },
+    /// Plusieurs routes optimales divergentes : chaque candidate est une
+    /// branche, évaluée puis recombinée par verdict (voir l'en-tête).
+    Ecmp {
+        routes: Vec<EcmpRoute>,
     },
     Blackhole {
         source: Option<SourceSpan>,
     },
-    /// ECMP divergent, interface éteinte, prochain saut injoignable…
+    /// Interface éteinte, prochain saut injoignable, borne ECMP dépassée…
     Undecidable {
         message: String,
     },
@@ -228,6 +256,12 @@ enum RouteKind {
 struct Walker<'a> {
     network: &'a Network,
     nodes_left: usize,
+    /// Budget CUMULÉ de branches ECMP (même borne que le moteur concret,
+    /// [`MAX_ECMP_TOTAL_BRANCHES`]).
+    ecmp_budget: usize,
+    /// Les réseaux portés par les interfaces actives du modèle : la moitié
+    /// « destination » du critère de sortie de périmètre.
+    model_nets: PrefixSet,
 }
 
 impl<'a> Walker<'a> {
@@ -449,7 +483,8 @@ impl<'a> Walker<'a> {
 
         // --- Routage : partition par plus long préfixe --------------------
         let regions = partition_routes(device, &in_vrf);
-        let mut forwarded: Vec<(IfaceId, FlowPart)> = Vec::new();
+        let mut forwarded: Vec<(IfaceId, Option<IpAddr>, FlowPart)> = Vec::new();
+        let mut ecmp_parts: Vec<(Vec<EcmpRoute>, FlowPart)> = Vec::new();
         for fp in parts {
             let mut rest = fp.set.clone();
             for (region, kind) in &regions {
@@ -486,7 +521,11 @@ impl<'a> Walker<'a> {
                             vec![Diagnostic::error(message.clone(), None)],
                         ));
                     }
-                    RouteKind::Forward { out_iface, source } => {
+                    RouteKind::Forward {
+                        out_iface,
+                        gateway,
+                        source,
+                    } => {
                         let mut chain2 = fp.chain.clone();
                         chain2.push(SymbolicDecision {
                             device: device.id.clone(),
@@ -500,9 +539,22 @@ impl<'a> Walker<'a> {
                         });
                         forwarded.push((
                             out_iface.clone(),
+                            *gateway,
                             FlowPart {
                                 set: sub,
                                 chain: chain2,
+                                pending_snat: fp.pending_snat.clone(),
+                            },
+                        ));
+                    }
+                    RouteKind::Ecmp { routes } => {
+                        // La décision de routage de chaque branche est
+                        // ajoutée par `ecmp_part`.
+                        ecmp_parts.push((
+                            routes.clone(),
+                            FlowPart {
+                                set: sub,
+                                chain: fp.chain.clone(),
                                 pending_snat: fp.pending_snat.clone(),
                             },
                         ));
@@ -534,19 +586,23 @@ impl<'a> Walker<'a> {
             visited: &visited2,
             depth,
         };
-        for (out_iface, fpart) in forwarded {
-            self.forward_part(&mut node, &ctx, &out_iface, fpart);
+        for (out_iface, gateway, fpart) in forwarded {
+            self.forward_part(&mut node, &ctx, &out_iface, gateway, fpart);
+        }
+        for (routes, fpart) in ecmp_parts {
+            self.ecmp_part(&mut node, &ctx, &routes, fpart);
         }
         node
     }
 
     /// Filtre de sortie + SNAT, puis livraison sur le réseau connecté de
-    /// sortie ou traversée du lien physique.
+    /// sortie, traversée du lien physique ou sortie de périmètre.
     fn forward_part(
         &mut self,
         node: &mut SymbolicNode,
         ctx: &DeviceCtx<'_>,
         out_iface_id: &IfaceId,
+        gateway: Option<IpAddr>,
         part: FlowPart,
     ) {
         let device = ctx.device;
@@ -688,6 +744,7 @@ impl<'a> Walker<'a> {
                     node,
                     ctx,
                     out_iface_id,
+                    gateway,
                     FlowPart {
                         set: rest,
                         chain: fp.chain,
@@ -695,6 +752,200 @@ impl<'a> Walker<'a> {
                     },
                 );
             }
+        }
+    }
+
+    /// Évalue une part sur CHAQUE route candidate d'un ECMP, puis recombine
+    /// par verdict : FERME là où toutes les branches s'accordent
+    /// (intersection des unions par verdict), `Unknown` diagnostiqué là où
+    /// elles divergent — même sémantique que le moteur concret. Les
+    /// terminaux fermes portent la chaîne de la PREMIÈRE branche (choix
+    /// documenté) précédée d'une décision `EcmpAgreed`.
+    fn ecmp_part(
+        &mut self,
+        node: &mut SymbolicNode,
+        ctx: &DeviceCtx<'_>,
+        routes: &[EcmpRoute],
+        part: FlowPart,
+    ) {
+        let ifaces: Vec<IfaceId> = routes.iter().map(|r| r.out_iface.clone()).collect();
+        if routes.len() > self.ecmp_budget {
+            node.terminals.push(terminal(
+                Verdict::Unknown,
+                part.set,
+                part.chain,
+                vec![Diagnostic::error(
+                    format!(
+                        "borne de bifurcation ECMP atteinte \
+                         ({MAX_ECMP_TOTAL_BRANCHES} branches cumulées) : part indéterminée"
+                    ),
+                    None,
+                )],
+            ));
+            return;
+        }
+        self.ecmp_budget -= routes.len();
+
+        // Chaque branche est évaluée dans un nœud TEMPORAIRE isolé ; seuls
+        // ses ensembles terminaux sont recombinés (l'arborescence détaillée
+        // des branches n'est pas conservée — documenté).
+        let base_chain_len = part.chain.len();
+        let mut branch_terms: Vec<Vec<SymbolicVerdictSet>> = Vec::with_capacity(routes.len());
+        let mut nat_seen = false;
+        for r in routes {
+            let mut tmp = SymbolicNode {
+                device: ctx.device.id.clone(),
+                in_iface: node.in_iface.clone(),
+                set_in: part.set.clone(),
+                terminals: Vec::new(),
+                branches: Vec::new(),
+            };
+            let mut chain2 = part.chain.clone();
+            chain2.push(SymbolicDecision {
+                device: ctx.device.id.clone(),
+                decision: Decision {
+                    stage: Stage::Route,
+                    rule: None,
+                    source: r.source.clone(),
+                    outcome: Outcome::RouteFound,
+                    shadowed_by: Vec::new(),
+                },
+            });
+            self.forward_part(
+                &mut tmp,
+                ctx,
+                &r.out_iface,
+                r.gateway,
+                FlowPart {
+                    set: part.set.clone(),
+                    chain: chain2,
+                    pending_snat: part.pending_snat.clone(),
+                },
+            );
+            let mut terms: Vec<&SymbolicVerdictSet> = Vec::new();
+            collect_terminals(&tmp, &mut terms);
+            let owned: Vec<SymbolicVerdictSet> = terms.into_iter().cloned().collect();
+            // Limite documentée (en-tête) : une traduction d'adresse APRÈS
+            // l'embranchement rend la comparaison inter-branches non fiable
+            // (ensembles exprimés après traduction).
+            nat_seen |= owned.iter().any(|t| {
+                t.decisions
+                    .iter()
+                    .skip(base_chain_len)
+                    .any(|d| d.decision.stage == Stage::Nat)
+            });
+            branch_terms.push(owned);
+        }
+
+        let list = ifaces
+            .iter()
+            .map(|i| i.to_string())
+            .collect::<Vec<_>>()
+            .join(", ");
+        if nat_seen {
+            node.terminals.push(terminal(
+                Verdict::Unknown,
+                part.set,
+                part.chain,
+                vec![Diagnostic::error(
+                    format!(
+                        "ECMP via {list} avec traduction d'adresse sur une branche : \
+                         comparaison inter-branches non fiable, part indéterminée \
+                         (prudence — jamais un verdict ferme erroné)"
+                    ),
+                    None,
+                )],
+            ));
+            return;
+        }
+
+        // Recombinaison par verdict : l'accord est l'intersection des
+        // unions par branche.
+        let mut firm_union = HeaderSet::empty();
+        for verdict in [
+            Verdict::Allowed,
+            Verdict::Denied,
+            Verdict::NoRoute,
+            Verdict::Loop,
+            Verdict::Unknown,
+        ] {
+            let mut agreement: Option<HeaderSet> = None;
+            for terms in &branch_terms {
+                let u = terms
+                    .iter()
+                    .filter(|t| t.verdict == verdict)
+                    .fold(HeaderSet::empty(), |acc, t| acc.union(&t.set));
+                agreement = Some(match agreement {
+                    None => u,
+                    Some(a) => a.intersect(&u),
+                });
+            }
+            let Some(agreement) = agreement else { continue };
+            if agreement.is_empty() {
+                continue;
+            }
+            let Some(first) = branch_terms.first() else {
+                continue;
+            };
+            for t in first.iter().filter(|t| t.verdict == verdict) {
+                let firm = t.set.intersect(&agreement);
+                if firm.is_empty() {
+                    continue;
+                }
+                let mut decisions = t.decisions.clone();
+                decisions.insert(
+                    base_chain_len.min(decisions.len()),
+                    SymbolicDecision {
+                        device: ctx.device.id.clone(),
+                        decision: Decision {
+                            stage: Stage::Route,
+                            rule: None,
+                            source: None,
+                            outcome: Outcome::EcmpAgreed {
+                                ifaces: ifaces.clone(),
+                            },
+                            shadowed_by: Vec::new(),
+                        },
+                    },
+                );
+                firm_union = firm_union.union(&firm);
+                node.terminals.push(SymbolicVerdictSet {
+                    verdict,
+                    sample: firm.sample(),
+                    set: firm,
+                    decisions,
+                    diagnostics: t.diagnostics.clone(),
+                });
+            }
+        }
+
+        // Le reste : les branches divergent → `Unknown` diagnostiqué avec
+        // les interfaces en cause.
+        let rem = part.set.subtract(&firm_union);
+        if !rem.is_empty() {
+            let mut chain2 = part.chain;
+            chain2.push(SymbolicDecision {
+                device: ctx.device.id.clone(),
+                decision: Decision {
+                    stage: Stage::Route,
+                    rule: None,
+                    source: None,
+                    outcome: Outcome::EcmpDiverged { ifaces },
+                    shadowed_by: Vec::new(),
+                },
+            });
+            node.terminals.push(terminal(
+                Verdict::Unknown,
+                rem,
+                chain2,
+                vec![Diagnostic::error(
+                    format!(
+                        "routes multiples et divergentes (ECMP) via {list} : verdicts \
+                         divergents selon la branche — part indéterminée (§6.3)"
+                    ),
+                    None,
+                )],
+            ));
         }
     }
 
@@ -783,12 +1034,18 @@ impl<'a> Walker<'a> {
         }
     }
 
-    /// Traverse le lien physique vers l'équipement voisin.
+    /// Traverse le lien physique vers l'équipement voisin — ou, s'il n'y a
+    /// AUCUN lien, applique le critère de sortie de périmètre (même
+    /// sémantique que le moteur concret, voir l'en-tête du module) : les
+    /// destinations hors de tout réseau modélisé SORTENT (`Allowed` +
+    /// décision `ExitsModel`), celles couvertes par un réseau modélisé
+    /// restent un trou de topologie interne (`Unknown`).
     fn traverse_link(
         &mut self,
         node: &mut SymbolicNode,
         ctx: &DeviceCtx<'_>,
         out_iface_id: &IfaceId,
+        gateway: Option<IpAddr>,
         fp: FlowPart,
     ) {
         let network = self.network;
@@ -802,18 +1059,48 @@ impl<'a> Walker<'a> {
         }
         let peer = match peers.len() {
             0 => {
-                node.terminals.push(terminal(
-                    Verdict::Unknown,
-                    fp.set,
-                    fp.chain,
-                    vec![Diagnostic::error(
-                        format!(
-                            "topologie incomplète : aucun lien depuis {}/{out_iface_id}",
-                            ctx.device.id
-                        ),
-                        None,
-                    )],
-                ));
+                let (inside, outside) = if self.model_nets.is_empty() {
+                    (HeaderSet::empty(), fp.set.clone())
+                } else {
+                    let model_hs = dst_restriction(&self.model_nets);
+                    (fp.set.intersect(&model_hs), fp.set.subtract(&model_hs))
+                };
+                if !inside.is_empty() {
+                    // Trou de topologie INTERNE : jamais « autorisé » (§6.3).
+                    node.terminals.push(terminal(
+                        Verdict::Unknown,
+                        inside,
+                        fp.chain.clone(),
+                        vec![Diagnostic::error(
+                            format!(
+                                "topologie incomplète : aucun lien depuis \
+                                 {}/{out_iface_id} et destinations dans le périmètre \
+                                 modélisé",
+                                ctx.device.id
+                            ),
+                            None,
+                        )],
+                    ));
+                }
+                if !outside.is_empty() {
+                    // SORTIE DE PÉRIMÈTRE : verdict ferme, décision explicite.
+                    let mut chain2 = fp.chain;
+                    chain2.push(SymbolicDecision {
+                        device: ctx.device.id.clone(),
+                        decision: Decision {
+                            stage: Stage::Route,
+                            rule: None,
+                            source: None,
+                            outcome: Outcome::ExitsModel {
+                                iface: out_iface_id.clone(),
+                                gateway,
+                            },
+                            shadowed_by: Vec::new(),
+                        },
+                    });
+                    node.terminals
+                        .push(terminal(Verdict::Allowed, outside, chain2, Vec::new()));
+                }
                 return;
             }
             1 => peers[0],
@@ -942,55 +1229,122 @@ fn partition_routes(device: &Device, vrf_id: &VrfId) -> Vec<(PrefixSet, RouteKin
         let Some(first) = winners.first() else {
             continue;
         };
-        let kind = if winners.iter().any(|c| c.next_hop != first.next_hop) {
-            RouteKind::Undecidable {
-                message: format!(
-                    "routes multiples et divergentes pour le préfixe {prefix} : \
-                     indéterminable sans deviner"
-                ),
+        // Prochains sauts DISTINCTS parmi les meilleures routes (l'ordre de
+        // la table est conservé ; les doublons comptent pour un).
+        let mut distinct: Vec<&Cand> = Vec::new();
+        for c in &winners {
+            if !distinct.iter().any(|d| d.next_hop == c.next_hop) {
+                distinct.push(c);
+            }
+        }
+        let kind = if distinct.len() > 1 {
+            // ECMP : chaque candidate devient une branche (même sémantique
+            // que le moteur concret, mêmes bornes).
+            if distinct.len() > MAX_ECMP_ROUTES {
+                RouteKind::Undecidable {
+                    message: format!(
+                        "{} routes optimales divergentes pour le préfixe {prefix} : \
+                         au-delà de la borne de {MAX_ECMP_ROUTES} branches évaluées",
+                        distinct.len()
+                    ),
+                }
+            } else if distinct.iter().any(|c| c.next_hop == NextHop::Drop) {
+                RouteKind::Undecidable {
+                    message: format!(
+                        "routes optimales mêlant transfert et rejet pour le préfixe \
+                         {prefix} : modèle incohérent"
+                    ),
+                }
+            } else {
+                let mut routes = Vec::with_capacity(distinct.len());
+                let mut fail: Option<String> = None;
+                for c in &distinct {
+                    match resolve_forward(device, vrf_id, &c.next_hop, prefix) {
+                        Ok((out_iface, gateway)) => routes.push(EcmpRoute {
+                            out_iface,
+                            gateway,
+                            source: c.source.clone(),
+                        }),
+                        Err(message) => {
+                            fail = Some(message);
+                            break;
+                        }
+                    }
+                }
+                match fail {
+                    Some(message) => RouteKind::Undecidable { message },
+                    None => RouteKind::Ecmp { routes },
+                }
             }
         } else {
             match &first.next_hop {
                 NextHop::Drop => RouteKind::Blackhole {
                     source: first.source.clone(),
                 },
-                NextHop::Interface(iface_id) => {
-                    let up = device
-                        .interfaces
-                        .get(iface_id)
-                        .map(|i| i.state == AdminState::Up)
-                        .unwrap_or(false);
-                    if up {
-                        RouteKind::Forward {
-                            out_iface: iface_id.clone(),
-                            source: first.source.clone(),
-                        }
-                    } else {
-                        RouteKind::Undecidable {
-                            message: format!(
-                                "la route {prefix} pointe vers l'interface « {iface_id} » \
-                                 absente ou désactivée"
-                            ),
-                        }
-                    }
-                }
-                NextHop::Ip(gw) => match resolve_gateway(device, vrf_id, gw) {
-                    Some(out_iface) => RouteKind::Forward {
+                other => match resolve_forward(device, vrf_id, other, prefix) {
+                    Ok((out_iface, gateway)) => RouteKind::Forward {
                         out_iface,
+                        gateway,
                         source: first.source.clone(),
                     },
-                    None => RouteKind::Undecidable {
-                        message: format!(
-                            "prochain saut {gw} injoignable : aucune interface active du VRF \
-                             « {vrf_id} » ne porte un réseau le contenant"
-                        ),
-                    },
+                    Err(message) => RouteKind::Undecidable { message },
                 },
             }
         };
         out.push((region, kind));
     }
     out
+}
+
+/// Résout un prochain saut de TRANSFERT (jamais `Drop`) en interface de
+/// sortie + passerelle éventuelle ; message d'indécidabilité sinon (même
+/// règle que `route.rs`).
+fn resolve_forward(
+    device: &Device,
+    vrf_id: &VrfId,
+    next_hop: &NextHop,
+    prefix: &IpNet,
+) -> Result<(IfaceId, Option<IpAddr>), String> {
+    match next_hop {
+        NextHop::Drop => Err(format!(
+            "route de rejet inattendue au transfert (préfixe {prefix})"
+        )),
+        NextHop::Interface(iface_id) => {
+            let up = device
+                .interfaces
+                .get(iface_id)
+                .map(|i| i.state == AdminState::Up)
+                .unwrap_or(false);
+            if up {
+                Ok((iface_id.clone(), None))
+            } else {
+                Err(format!(
+                    "la route {prefix} pointe vers l'interface « {iface_id} » \
+                     absente ou désactivée"
+                ))
+            }
+        }
+        NextHop::Ip(gw) => match resolve_gateway(device, vrf_id, gw) {
+            Some(out_iface) => Ok((out_iface, Some(*gw))),
+            None => Err(format!(
+                "prochain saut {gw} injoignable : aucune interface active du VRF \
+                 « {vrf_id} » ne porte un réseau le contenant"
+            )),
+        },
+    }
+}
+
+/// Les réseaux portés par les interfaces ACTIVES du modèle : la moitié
+/// « destination » du critère de sortie de périmètre (voir `engine.rs`).
+fn model_networks(network: &Network) -> PrefixSet {
+    PrefixSet::from_nets(
+        network
+            .devices
+            .values()
+            .flat_map(|d| d.interfaces.values())
+            .filter(|i| i.state == AdminState::Up)
+            .flat_map(|i| i.addrs.iter().map(|a| a.trunc())),
+    )
 }
 
 /// L'interface de sortie vers un prochain saut IP (même règle que
@@ -1352,5 +1706,165 @@ mod tests {
         assert!(t.root.is_none() && !t.diagnostics.is_empty());
         let t = symbolic_trace_from(&network, &entry("fw1", "lan"), &HeaderSet::empty());
         assert!(t.root.is_none() && !t.diagnostics.is_empty());
+    }
+
+    // -----------------------------------------------------------------------
+    // Sortie de périmètre et ECMP : même sémantique que le moteur concret,
+    // vérifiée par rejeu concret de chaque pavé terminal (§4.3).
+    // -----------------------------------------------------------------------
+
+    use crate::testutil::{ecmp_network, single_device_network, with_fw_egress};
+
+    /// Rejoue dans le moteur concret un paquet témoin de chaque pavé de
+    /// chaque terminal : les deux modes doivent s'accorder.
+    fn assert_concrete_agreement(network: &Network, trace: &SymbolicTrace) -> usize {
+        let mut checked = 0;
+        for vs in trace.verdict_sets() {
+            for cube in vs.set.cubes() {
+                let pkt = cube.sample().expect("pavé non vide");
+                assert_eq!(
+                    trace_packet(network, &pkt).verdict,
+                    vs.verdict,
+                    "désaccord symbolique/concret sur {pkt:?}"
+                );
+                checked += 1;
+            }
+        }
+        checked
+    }
+
+    /// (e) Sortie de périmètre : la part acceptée par le filtre et routée
+    /// hors du modèle devient un terminal `Allowed` portant la décision
+    /// `ExitsModel` ; le reste est refusé. Cohérence concrète rejouée.
+    #[test]
+    fn sortie_de_perimetre_symbolique_coherente_avec_le_concret() {
+        let network = with_fw_egress(
+            single_device_network(),
+            vec![rule(
+                "10",
+                vec![AddrExpr::Net(net("10.0.10.0/24"))],
+                vec![],
+                vec![tcp_svc(443)],
+                Some("lan"),
+                Some("wan"),
+                Action::Accept,
+                100,
+            )],
+            Action::Deny,
+        );
+        let start = set_src_dst("10.0.10.0/24", "203.0.113.0/24");
+        let trace = symbolic_trace_from(&network, &entry("fw", "lan"), &start);
+
+        // Partition complète : rien de perdu, rien d'inventé.
+        let union = union_of(&trace.verdict_sets());
+        assert!(union.contains_set(&start) && start.contains_set(&union));
+
+        // L'ensemble Allowed est EXACTEMENT le flux de la règle 10, et il
+        // porte la décision de sortie de périmètre (wan1, passerelle).
+        let allowed = trace.sets_with(Verdict::Allowed);
+        assert!(!allowed.is_empty());
+        let allowed_union = union_of(&allowed);
+        let expected = HeaderSet::flow(
+            net("10.0.10.0/24"),
+            net("203.0.113.0/24"),
+            6,
+            calque_model::PortRange::single(443),
+        );
+        assert!(allowed_union.contains_set(&expected) && expected.contains_set(&allowed_union));
+        for vs in &allowed {
+            let exits = vs
+                .decisions
+                .iter()
+                .find(|d| matches!(d.decision.outcome, Outcome::ExitsModel { .. }))
+                .expect("décision ExitsModel");
+            assert_eq!(
+                exits.decision.outcome,
+                Outcome::ExitsModel {
+                    iface: IfaceId::new("wan1"),
+                    gateway: Some(ip("198.51.100.1")),
+                }
+            );
+        }
+        // Aucune part indécidable : le périmètre modélisé répond fermement.
+        assert!(trace.sets_with(Verdict::Unknown).is_empty());
+
+        assert!(assert_concrete_agreement(&network, &trace) >= 2);
+    }
+
+    /// (e) ECMP dont toutes les branches s'accordent : verdict ferme, avec
+    /// la décision `EcmpAgreed`. Cohérence concrète rejouée (le moteur
+    /// concret évalue les mêmes branches).
+    #[test]
+    fn ecmp_symbolique_verdict_identique_est_ferme() {
+        let network = with_fw_egress(ecmp_network(), vec![], Action::Accept);
+        let start = set_src_dst("10.0.10.0/24", "8.8.8.0/24");
+        let trace = symbolic_trace_from(&network, &entry("fw", "lan"), &start);
+
+        let union = union_of(&trace.verdict_sets());
+        assert!(union.contains_set(&start) && start.contains_set(&union));
+
+        // Tout est autorisé, fermement, avec l'embranchement documenté.
+        let allowed = trace.sets_with(Verdict::Allowed);
+        let allowed_union = union_of(&allowed);
+        assert!(allowed_union.contains_set(&start) && start.contains_set(&allowed_union));
+        let vs = allowed.first().expect("terminal Allowed");
+        assert!(vs.decisions.iter().any(|d| {
+            d.decision.outcome
+                == Outcome::EcmpAgreed {
+                    ifaces: vec![IfaceId::new("wan1"), IfaceId::new("wan2")],
+                }
+        }));
+        // La justification suit la première branche : sortie via wan1.
+        assert!(vs.decisions.iter().any(|d| matches!(
+            &d.decision.outcome,
+            Outcome::ExitsModel { iface, .. } if *iface == IfaceId::new("wan1")
+        )));
+
+        assert!(assert_concrete_agreement(&network, &trace) >= 1);
+    }
+
+    /// (e) ECMP aux verdicts divergents (une branche filtrée en sortie,
+    /// l'autre non) : la part devient `Unknown` diagnostiqué — et le moteur
+    /// concret dit la même chose sur chaque paquet témoin.
+    #[test]
+    fn ecmp_symbolique_divergent_rend_unknown() {
+        let network = with_fw_egress(
+            ecmp_network(),
+            vec![rule(
+                "50",
+                vec![],
+                vec![],
+                vec![],
+                None,
+                Some("wan2z"),
+                Action::Deny,
+                500,
+            )],
+            Action::Accept,
+        );
+        let start = set_src_dst("10.0.10.0/24", "8.8.8.0/24");
+        let trace = symbolic_trace_from(&network, &entry("fw", "lan"), &start);
+
+        let union = union_of(&trace.verdict_sets());
+        assert!(union.contains_set(&start) && start.contains_set(&union));
+
+        // Toute la part diverge : wan1 autorise (sortie de périmètre),
+        // wan2 refuse (règle 50) → Unknown diagnostiqué.
+        let unknown = trace.sets_with(Verdict::Unknown);
+        let unknown_union = union_of(&unknown);
+        assert!(unknown_union.contains_set(&start) && start.contains_set(&unknown_union));
+        let vs = unknown.first().expect("terminal Unknown");
+        assert!(vs.decisions.iter().any(|d| {
+            d.decision.outcome
+                == Outcome::EcmpDiverged {
+                    ifaces: vec![IfaceId::new("wan1"), IfaceId::new("wan2")],
+                }
+        }));
+        assert!(vs
+            .diagnostics
+            .iter()
+            .any(|d| d.message.contains("divergentes")));
+
+        assert!(assert_concrete_agreement(&network, &trace) >= 1);
     }
 }

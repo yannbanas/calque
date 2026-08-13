@@ -185,6 +185,7 @@ pub fn trace_concrete(network: &Network, packet: &ConcretePacket) -> Trace {
 pub fn trace_to_view(trace: &Trace) -> TraceView {
     TraceView {
         verdict: verdict_view(trace.verdict),
+        verdict_note: exits_model_note(trace),
         hops: trace
             .hops
             .iter()
@@ -200,14 +201,34 @@ pub fn trace_to_view(trace: &Trace) -> TraceView {
     }
 }
 
+/// La note de sortie de périmètre d'une trace, si elle en porte une : la
+/// ligne de verdict DOIT la mentionner (« autorisé (sort du périmètre
+/// modélisé via wan1) ») pour ne jamais laisser croire que la destination
+/// est modélisée.
+fn exits_model_note(trace: &Trace) -> Option<String> {
+    trace
+        .hops
+        .iter()
+        .flat_map(|h| &h.decisions)
+        .find_map(|d| match &d.outcome {
+            calque_engine::Outcome::ExitsModel { iface, gateway } => Some(match gateway {
+                Some(gw) => format!("sort du périmètre modélisé via {iface}, passerelle {gw}"),
+                None => format!("sort du périmètre modélisé via {iface}"),
+            }),
+            _ => None,
+        })
+}
+
 /// Adapte une décision du moteur vers la vue rendue par `calque-report`
-/// (partagée entre la trace concrète et les rapports symboliques).
+/// (partagée entre la trace concrète et les rapports symboliques). Le
+/// libellé est le `Display` COMPLET de l'issue (parties dynamiques
+/// comprises : interface de sortie de périmètre, branches ECMP…).
 pub fn decision_view(d: &calque_engine::Decision) -> DecisionView {
     DecisionView {
         stage: stage_view(d.stage),
         rule: d.rule.as_ref().map(|r| r.to_string()),
         source: d.source.clone(),
-        outcome: d.outcome.label().to_owned(),
+        outcome: d.outcome.to_string(),
         shadowed_by: d.shadowed_by.iter().map(|r| r.to_string()).collect(),
     }
 }

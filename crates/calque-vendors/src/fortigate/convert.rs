@@ -8,12 +8,14 @@
 //! - tout le reste → `Diagnostic` avec span, accumulé dans
 //!   `Fidelity::Partial`. Jamais d'ignorance silencieuse.
 
-use std::net::Ipv4Addr;
+use std::collections::{BTreeMap, BTreeSet};
+use std::net::{IpAddr, Ipv4Addr};
 
 use calque_model::{
-    Action, AddrExpr, AddrObject, AdminState, Device, DeviceId, Diagnostic, Fidelity, IfaceId,
-    Interface, NatAction, NextHop, ObjectId, Policy, PolicyId, Route, RouteOrigin, Rule, RuleId,
-    RuleMatch, Service, ServiceExpr, ServiceObject, Severity, SourceSpan, Vendor, VrfId, ZoneId,
+    Action, AddrExpr, AddrObject, AdminState, Device, DeviceId, Diagnostic, DnatTarget, Fidelity,
+    IfaceId, Interface, NatAction, NextHop, ObjectId, Policy, PolicyId, PortRange, ProtoMatch,
+    Route, RouteOrigin, Rule, RuleId, RuleMatch, Service, ServiceExpr, ServiceObject, Severity,
+    SourceSpan, Vendor, VrfId, ZoneId,
 };
 
 use super::values;
@@ -24,6 +26,82 @@ const DEFAULT_STATIC_DISTANCE: u32 = 10;
 
 /// Identifiant de l'unique politique de filtrage forward d'un FortiGate.
 const FORWARD_POLICY: &str = "forward";
+
+/// Zone SD-WAN implicite de FortiOS : elle existe dès que le SD-WAN est
+/// activé, même sans `config zone`, et c'est la zone par défaut des
+/// membres sans `set zone` (comportement documenté du produit).
+const SDWAN_DEFAULT_ZONE: &str = "virtual-wan-link";
+
+/// La redirection portée par un VIP (`config firewall vip`), une fois
+/// comprise EXACTEMENT. Un VIP dont la redirection n'est pas représentable
+/// (plage d'adresses externes, plage de ports décalée) n'est PAS stocké :
+/// il est diagnostiqué, et les règles qui le référencent deviennent
+/// irrésolubles — jamais approximées (§6.3).
+#[derive(Debug, Clone)]
+struct Vip {
+    /// La cible de réécriture de destination. `port: None` = port
+    /// préservé (VIP 1:1, ou plage de ports identitaire).
+    dnat: DnatTarget,
+    /// La contrainte de service induite par `set protocol` + `set extport`
+    /// (redirection de ports uniquement). `None` pour un VIP 1:1.
+    service: Option<Service>,
+}
+
+/// Un membre SD-WAN (`config members` de `config system sdwan`).
+#[derive(Debug, Clone)]
+struct SdwanMember {
+    iface: IfaceId,
+    /// Passerelle du membre ; absente = routage sur l'interface seule.
+    gateway: Option<IpAddr>,
+    zone: String,
+}
+
+/// Destination d'une route statique : littérale (`set dst`) ou par objet
+/// adresse (`set dstaddr`), résolue APRÈS la première passe (l'ordre des
+/// blocs dans le fichier ne garantit pas que les objets précèdent les
+/// routes).
+#[derive(Debug, Clone)]
+enum RouteDest {
+    Literal(ipnet::IpNet),
+    Object(String),
+}
+
+/// Prochain saut d'une route statique : direct, ou une zone SD-WAN à
+/// développer en une route PAR MEMBRE (candidates ECMP).
+#[derive(Debug, Clone)]
+enum RouteVia {
+    Single(NextHop),
+    SdwanZone(String),
+}
+
+/// Une route statique en attente de résolution (fin de première passe).
+#[derive(Debug, Clone)]
+struct PendingRoute {
+    seq: String,
+    dest: RouteDest,
+    via: RouteVia,
+    metric: u32,
+    span: SourceSpan,
+}
+
+/// Un sélecteur de phase2 : par objet adresse (`src-name`/`dst-name`) ou
+/// par préfixe (`src-subnet`/`dst-subnet`).
+#[derive(Debug, Clone)]
+enum Phase2Sel {
+    Name(String),
+    Subnet(ipnet::IpNet),
+}
+
+/// Un sélecteur IPsec phase2 en attente (résolu après la première passe :
+/// les objets adresse peuvent être déclarés après le bloc VPN).
+#[derive(Debug, Clone)]
+struct PendingPhase2 {
+    name: String,
+    phase1name: String,
+    src: Option<Phase2Sel>,
+    dst: Option<Phase2Sel>,
+    span: SourceSpan,
+}
 
 pub(super) fn convert(tree: &ConfigTree) -> Result<AdapterOutput, Vec<Diagnostic>> {
     if tree.roots.is_empty() {
@@ -43,6 +121,23 @@ struct Converter {
     unsupported: Vec<Diagnostic>,
     /// Constats informatifs qui ne dégradent pas la fidélité.
     notes: Vec<Diagnostic>,
+    /// VIP compris exactement, par nom — pour porter le DNAT sur les
+    /// règles qui les référencent en `dstaddr`.
+    vips: BTreeMap<String, Vip>,
+    /// Groupes de VIP (`config firewall vipgrp`), par nom.
+    vipgrps: BTreeMap<String, Vec<String>>,
+    /// `config system sdwan` : `set status enable`.
+    sdwan_enabled: bool,
+    /// Zones SD-WAN déclarées (+ la zone implicite de FortiOS).
+    sdwan_zones: BTreeSet<String>,
+    /// Membres SD-WAN actifs, dans l'ordre du fichier.
+    sdwan_members: Vec<SdwanMember>,
+    /// Routes statiques en attente (résolues après la première passe).
+    pending_routes: Vec<PendingRoute>,
+    /// Tunnels phase1 vus (`config vpn ipsec phase1-interface`).
+    phase1_names: BTreeSet<String>,
+    /// Sélecteurs phase2 en attente (résolus après la première passe).
+    pending_phase2: Vec<PendingPhase2>,
 }
 
 impl Converter {
@@ -54,6 +149,14 @@ impl Converter {
             device: Device::new(id, Vendor::Fortigate),
             unsupported: Vec::new(),
             notes: Vec::new(),
+            vips: BTreeMap::new(),
+            vipgrps: BTreeMap::new(),
+            sdwan_enabled: false,
+            sdwan_zones: BTreeSet::new(),
+            sdwan_members: Vec::new(),
+            pending_routes: Vec::new(),
+            phase1_names: BTreeSet::new(),
+            pending_phase2: Vec::new(),
         }
     }
 
@@ -97,16 +200,50 @@ impl Converter {
     /// Deux passes : tout sauf les politiques d'abord (les politiques ont
     /// besoin de connaître interfaces, zones et objets), puis les
     /// politiques — quel que soit l'ordre des blocs dans le fichier.
+    ///
+    /// Entre les deux : les routes statiques (dont celles par objet
+    /// adresse ou par zone SD-WAN) et les sélecteurs IPsec phase2 sont
+    /// RÉSOLUS — ils référencent des objets, membres et interfaces que
+    /// l'ordre des blocs dans le fichier ne garantit pas.
     fn run(&mut self, tree: &ConfigTree) {
         for child in &tree.roots {
             if !is_policy_block(child) {
                 self.dispatch(child);
             }
         }
+        self.resolve_pending_routes();
+        self.build_ipsec_policies();
+        self.register_sdwan_zones();
         for child in &tree.roots {
             if is_policy_block(child) {
                 self.policy_block(child);
             }
+        }
+    }
+
+    /// Les zones SD-WAN deviennent de vraies zones du modèle, membres =
+    /// les interfaces des membres SD-WAN : les politiques `dstintf
+    /// "SD-WAN"` doivent s'appliquer quand le paquet sort par wan1 ou
+    /// wan2 — sans cette inscription, elles ne matchent jamais et tout
+    /// flux vers Internet tombe à tort sur le refus par défaut.
+    fn register_sdwan_zones(&mut self) {
+        if self.sdwan_members.is_empty() {
+            return;
+        }
+        for zone in self.sdwan_zones.clone() {
+            let members: Vec<IfaceId> = self
+                .sdwan_members
+                .iter()
+                .filter(|m| m.zone == zone)
+                .map(|m| m.iface.clone())
+                .collect();
+            if members.is_empty() {
+                continue;
+            }
+            self.device
+                .zones
+                .entry(ZoneId::new(zone.as_str()))
+                .or_insert(members);
         }
     }
 
@@ -128,6 +265,11 @@ impl Converter {
             ["firewall", "addrgrp"] => self.addrgrp_block(node),
             ["firewall", "service", "custom"] => self.services_block(node),
             ["firewall", "service", "group"] => self.service_group_block(node),
+            ["firewall", "vip"] => self.vip_block(node),
+            ["firewall", "vipgrp"] => self.vipgrp_block(node),
+            ["system", "sdwan"] => self.sdwan_block(node),
+            ["vpn", "ipsec", "phase1-interface"] => self.phase1_block(node),
+            ["vpn", "ipsec", "phase2-interface"] => self.phase2_block(node),
             _ => self.unsupported(
                 format!("bloc `config {}` non géré", node.args.join(" ")),
                 &node.span,
@@ -344,12 +486,10 @@ impl Converter {
             let Some(seq) = self.edit_name(edit, "config router static") else {
                 continue;
             };
-            // Sans `set dst`, une route statique FortiGate est la route
-            // par défaut 0.0.0.0/0 (comportement documenté du produit).
-            let mut prefix: ipnet::IpNet = ipnet::IpNet::V4(
-                ipnet::Ipv4Net::new(Ipv4Addr::UNSPECIFIED, 0).expect("préfixe /0 constant"),
-            );
-            let mut gateway: Option<std::net::IpAddr> = None;
+            let mut dst_net: Option<ipnet::IpNet> = None;
+            let mut dst_obj: Option<String> = None;
+            let mut sdwan_zone: Option<String> = None;
+            let mut gateway: Option<IpAddr> = None;
             let mut out_iface: Option<IfaceId> = None;
             let mut distance: Option<u32> = None;
             let mut blackhole = false;
@@ -369,7 +509,7 @@ impl Converter {
                         match values::ip_mask_to_net(d.arg(1).unwrap_or(""), d.arg(2)) {
                             // `.trunc()` : une destination de route est un
                             // réseau, les bits d'hôte sont normalisés.
-                            Some(net) => prefix = net.trunc(),
+                            Some(net) => dst_net = Some(net.trunc()),
                             None => {
                                 self.unsupported(
                                     format!("destination invalide sur la route {seq}"),
@@ -379,6 +519,30 @@ impl Converter {
                             }
                         }
                     }
+                    // Route par objet adresse : résolue APRÈS la première
+                    // passe (les objets peuvent être déclarés plus loin).
+                    Some("dstaddr") => match d.arg(1) {
+                        Some(name) => dst_obj = Some(name.to_owned()),
+                        None => {
+                            self.unsupported(
+                                format!("`set dstaddr` sans objet sur la route {seq}"),
+                                &d.span,
+                            );
+                            broken = true;
+                        }
+                    },
+                    // Route par zone SD-WAN : développée en une route PAR
+                    // MEMBRE lors de la résolution.
+                    Some("sdwan-zone") => match d.arg(1) {
+                        Some(name) => sdwan_zone = Some(name.to_owned()),
+                        None => {
+                            self.unsupported(
+                                format!("`set sdwan-zone` sans zone sur la route {seq}"),
+                                &d.span,
+                            );
+                            broken = true;
+                        }
+                    },
                     Some("gateway") => match d.arg(1).and_then(|v| v.parse().ok()) {
                         Some(ip) => gateway = Some(ip),
                         None => {
@@ -415,40 +579,1005 @@ impl Converter {
             if broken {
                 continue; // déjà diagnostiqué, on ne devine pas une route.
             }
-            // FortiGate : la passerelle prime ; `device` seul route sur
-            // l'interface ; `blackhole` rejette.
-            let next_hop = if blackhole {
-                NextHop::Drop
+            // `dst` et `dstaddr` sont exclusifs chez FortiOS : les deux à
+            // la fois, c'est une entrée incohérente — on ne devine pas
+            // laquelle prime.
+            if dst_net.is_some() && dst_obj.is_some() {
+                self.unsupported(
+                    format!("route {seq} : `set dst` et `set dstaddr` simultanés, incohérent"),
+                    &edit.span,
+                );
+                continue;
+            }
+            let dest = match dst_obj {
+                Some(name) => RouteDest::Object(name),
+                // Sans `set dst`, une route statique FortiGate est la
+                // route par défaut 0.0.0.0/0 (comportement documenté).
+                None => RouteDest::Literal(dst_net.unwrap_or(ipnet::IpNet::V4(
+                    ipnet::Ipv4Net::new(Ipv4Addr::UNSPECIFIED, 0).expect("préfixe /0 constant"),
+                ))),
+            };
+            // FortiGate : `blackhole` rejette (et exclut tout saut) ; une
+            // zone SD-WAN est exclusive d'une passerelle ou d'une
+            // interface ; sinon la passerelle prime et `device` seul
+            // route sur l'interface.
+            let via = if blackhole {
+                RouteVia::Single(NextHop::Drop)
+            } else if let Some(zone) = sdwan_zone {
+                if gateway.is_some() || out_iface.is_some() {
+                    self.unsupported(
+                        format!(
+                            "route {seq} : `set sdwan-zone` combiné à une passerelle ou une \
+                             interface, incohérent"
+                        ),
+                        &edit.span,
+                    );
+                    continue;
+                }
+                RouteVia::SdwanZone(zone)
             } else if let Some(ip) = gateway {
-                NextHop::Ip(ip)
+                RouteVia::Single(NextHop::Ip(ip))
             } else if let Some(iface) = out_iface {
-                NextHop::Interface(iface)
+                RouteVia::Single(NextHop::Interface(iface))
             } else {
                 self.unsupported(
-                    format!("route {seq} sans passerelle, ni interface, ni blackhole"),
+                    format!(
+                        "route {seq} sans passerelle, ni interface, ni blackhole, ni zone SD-WAN"
+                    ),
                     &edit.span,
                 );
                 continue;
             };
 
-            let route = Route {
-                prefix,
-                next_hop,
+            self.pending_routes.push(PendingRoute {
+                seq,
+                dest,
+                via,
                 // `distance` FortiGate → métrique du modèle (le champ
                 // `set priority` départagerait des distances égales ; il
                 // serait diagnostiqué comme non géré s'il apparaissait).
                 metric: distance.unwrap_or(DEFAULT_STATIC_DISTANCE),
-                origin: RouteOrigin::Static,
-                source: Some(edit.span.clone()),
+                span: edit.span.clone(),
+            });
+        }
+    }
+
+    /// Résout les routes statiques en attente, une fois la première passe
+    /// terminée (objets adresse et membres SD-WAN connus).
+    ///
+    /// - `dstaddr` → UNE route par préfixe de l'objet (mêmes saut,
+    ///   métrique et span) ; un objet irrésoluble (absent — fqdn ou
+    ///   géographie non modélisés — ou groupe brisé) est diagnostiqué,
+    ///   jamais approximé ;
+    /// - `sdwan-zone` → UNE route par membre actif de la zone (même
+    ///   préfixe, même métrique) : le moteur les voit comme candidates
+    ///   ECMP et les évalue par branches — c'est le comportement voulu,
+    ///   « l'un des WAN ».
+    fn resolve_pending_routes(&mut self) {
+        let pending = std::mem::take(&mut self.pending_routes);
+        for p in pending {
+            let prefixes: Vec<ipnet::IpNet> = match &p.dest {
+                RouteDest::Literal(net) => vec![*net],
+                RouteDest::Object(name) => {
+                    let (nets, unresolved) = self.resolve_addr_prefixes(name);
+                    for missing in &unresolved {
+                        self.unsupported(
+                            format!(
+                                "route {} : objet adresse `{missing}` irrésoluble (absent, \
+                                 fqdn/géographie non modélisés, ou groupe brisé)",
+                                p.seq
+                            ),
+                            &p.span,
+                        );
+                    }
+                    if nets.is_empty() {
+                        continue; // rien de résolu : pas de route devinée.
+                    }
+                    nets
+                }
             };
-            // FortiGate sans VDOM ni VRF explicite : tout va dans le VRF
-            // par défaut.
-            self.device
-                .vrfs
-                .entry(VrfId::default_vrf())
-                .or_default()
-                .routes
-                .push(route);
+            let hops: Vec<NextHop> = match &p.via {
+                RouteVia::Single(hop) => vec![hop.clone()],
+                RouteVia::SdwanZone(zone) => {
+                    if !self.sdwan_enabled {
+                        self.unsupported(
+                            format!(
+                                "route {} via la zone SD-WAN `{zone}` : `config system sdwan` \
+                                 absent ou désactivé",
+                                p.seq
+                            ),
+                            &p.span,
+                        );
+                        continue;
+                    }
+                    if !self.sdwan_zones.contains(zone) {
+                        self.unsupported(
+                            format!("route {} : zone SD-WAN `{zone}` inconnue", p.seq),
+                            &p.span,
+                        );
+                        continue;
+                    }
+                    let hops: Vec<NextHop> = self
+                        .sdwan_members
+                        .iter()
+                        .filter(|m| &m.zone == zone)
+                        .map(|m| match m.gateway {
+                            Some(ip) => NextHop::Ip(ip),
+                            None => NextHop::Interface(m.iface.clone()),
+                        })
+                        .collect();
+                    if hops.is_empty() {
+                        self.unsupported(
+                            format!(
+                                "route {} : la zone SD-WAN `{zone}` n'a aucun membre actif",
+                                p.seq
+                            ),
+                            &p.span,
+                        );
+                        continue;
+                    }
+                    hops
+                }
+            };
+            let routes = self.device.vrfs.entry(VrfId::default_vrf()).or_default();
+            for prefix in &prefixes {
+                for hop in &hops {
+                    routes.routes.push(Route {
+                        prefix: *prefix,
+                        next_hop: hop.clone(),
+                        metric: p.metric,
+                        origin: RouteOrigin::Static,
+                        source: Some(p.span.clone()),
+                    });
+                }
+            }
+        }
+    }
+
+    /// Les préfixes EXACTS d'un objet adresse (résolution récursive des
+    /// groupes, bornée par un ensemble de visite). Rend `(préfixes,
+    /// noms irrésolus)` : les membres résolus restent exacts, les
+    /// manquants sont rapportés à l'appelant — qui diagnostique.
+    fn resolve_addr_prefixes(&self, name: &str) -> (Vec<ipnet::IpNet>, Vec<String>) {
+        fn go(
+            store: &BTreeMap<ObjectId, AddrObject>,
+            name: &str,
+            visited: &mut BTreeSet<String>,
+            nets: &mut Vec<ipnet::IpNet>,
+            unresolved: &mut Vec<String>,
+        ) {
+            if !visited.insert(name.to_owned()) {
+                return; // déjà vu (cycle ou doublon) : compté une fois.
+            }
+            match store.get(&ObjectId::new(name)) {
+                Some(AddrObject::Nets(list)) => {
+                    // Une destination de route est un réseau : les bits
+                    // d'hôte sont normalisés.
+                    nets.extend(list.iter().map(|n| n.trunc()));
+                }
+                Some(AddrObject::Group(members)) => {
+                    for m in members {
+                        go(store, m.as_str(), visited, nets, unresolved);
+                    }
+                }
+                None => unresolved.push(name.to_owned()),
+            }
+        }
+        let mut nets = Vec::new();
+        let mut unresolved = Vec::new();
+        let mut visited = BTreeSet::new();
+        go(
+            &self.device.objects.addresses,
+            name,
+            &mut visited,
+            &mut nets,
+            &mut unresolved,
+        );
+        (nets, unresolved)
+    }
+
+    // -- config firewall vip --------------------------------------------
+
+    /// `config firewall vip` : chaque VIP compris devient un objet
+    /// adresse `Nets([extip/32])` sous son nom (les `dstaddr` qui le
+    /// référencent se résolvent), et sa redirection est mémorisée pour
+    /// être portée en DNAT par les règles qui le référencent.
+    ///
+    /// Représentable EXACTEMENT (§6.3) :
+    /// - VIP 1:1 (`set portforward` absent/disable) : toutes destinations
+    ///   `extip` → `mappedip`, tous ports préservés ;
+    /// - redirection d'un port unique : `extport` → `mappedport` ;
+    /// - plage de ports IDENTITAIRE (`extport` == `mappedport`) : DNAT
+    ///   d'adresse seule, ports préservés.
+    ///
+    /// Non représentable → diagnostic, le VIP n'est PAS stocké (les
+    /// règles qui le référencent deviennent irrésolubles — jamais
+    /// approximées) : plage d'adresses externes (une cible DNAT par
+    /// adresse), plage de ports réellement décalée.
+    ///
+    /// `set extintf` est COMPRIS et sans effet propre : la contrainte
+    /// d'interface d'entrée est déjà portée par le `srcintf` des
+    /// politiques qui référencent le VIP.
+    fn vip_block(&mut self, block: &ConfigNode) {
+        for edit in &block.children {
+            let Some(name) = self.edit_name(edit, "config firewall vip") else {
+                continue;
+            };
+            let mut extip_raw: Option<String> = None;
+            let mut mappedip_raw: Option<String> = None;
+            let mut portforward = false;
+            let mut protocol: Option<String> = None;
+            let mut extport_raw: Option<String> = None;
+            let mut mappedport_raw: Option<String> = None;
+            let mut broken = false;
+
+            for d in &edit.children {
+                if d.keyword != "set" {
+                    self.unsupported(
+                        format!("directive `{}` non gérée dans le VIP `{name}`", d.keyword),
+                        &d.span,
+                    );
+                    continue;
+                }
+                match d.arg(0) {
+                    // Plusieurs valeurs (`set mappedip "a" "b"` :
+                    // répartition sur plusieurs plages) : une cible DNAT
+                    // unique ne peut pas les représenter — jamais tronqué
+                    // en silence.
+                    Some(key @ ("extip" | "mappedip")) if d.args.len() > 2 => {
+                        self.unsupported(
+                            format!(
+                                "`set {key}` à valeurs multiples non représentable dans le \
+                                 VIP `{name}`"
+                            ),
+                            &d.span,
+                        );
+                        broken = true;
+                    }
+                    Some("extip") => extip_raw = d.arg(1).map(str::to_owned),
+                    Some("mappedip") => mappedip_raw = d.arg(1).map(str::to_owned),
+                    Some("portforward") => portforward = d.arg(1) == Some("enable"),
+                    Some("protocol") => protocol = d.arg(1).map(str::to_owned),
+                    Some("extport") => extport_raw = d.arg(1).map(str::to_owned),
+                    Some("mappedport") => mappedport_raw = d.arg(1).map(str::to_owned),
+                    Some("type") => match d.arg(1) {
+                        // Le seul type modélisé : la traduction statique.
+                        Some("static-nat") => {}
+                        other => {
+                            self.unsupported(
+                                format!(
+                                    "type de VIP `{}` non géré (`{name}`)",
+                                    other.unwrap_or("?")
+                                ),
+                                &d.span,
+                            );
+                            broken = true;
+                        }
+                    },
+                    // Compris, sans effet propre sur l'accessibilité
+                    // (extintf : voir l'en-tête de la méthode).
+                    Some("extintf" | "comment" | "color" | "uuid" | "arp-reply") => {}
+                    other => self.unsupported(
+                        format!(
+                            "`set {}` non géré dans le VIP `{name}`",
+                            other.unwrap_or("")
+                        ),
+                        &d.span,
+                    ),
+                }
+            }
+            if broken {
+                continue;
+            }
+
+            let Some(extip_raw) = extip_raw else {
+                self.unsupported(format!("VIP `{name}` sans `set extip`"), &edit.span);
+                continue;
+            };
+            let Some((ext_start, ext_end)) = values::parse_ip_span(&extip_raw) else {
+                self.unsupported(
+                    format!("`set extip` invalide dans le VIP `{name}`"),
+                    &edit.span,
+                );
+                continue;
+            };
+            if ext_start != ext_end {
+                self.unsupported(
+                    format!(
+                        "VIP `{name}` : plage d'adresses externes non représentable (une cible \
+                         DNAT par adresse externe) — jamais approximée"
+                    ),
+                    &edit.span,
+                );
+                continue;
+            }
+            let Some(mappedip_raw) = mappedip_raw else {
+                self.unsupported(format!("VIP `{name}` sans `set mappedip`"), &edit.span);
+                continue;
+            };
+            let Some((mapped_start, mapped_end)) = values::parse_ip_span(&mappedip_raw) else {
+                self.unsupported(
+                    format!("`set mappedip` invalide dans le VIP `{name}`"),
+                    &edit.span,
+                );
+                continue;
+            };
+            if mapped_start != mapped_end {
+                self.unsupported(
+                    format!(
+                        "VIP `{name}` : plage d'adresses traduites non représentable (une cible \
+                         DNAT par adresse) — jamais approximée"
+                    ),
+                    &edit.span,
+                );
+                continue;
+            }
+
+            let (dnat_port, service): (Option<u16>, Option<Service>) = if !portforward {
+                // VIP 1:1 : toutes destinations extip → mappedip, tous
+                // ports et protocoles. Des ports déclarés sans
+                // `portforward enable` seraient incohérents.
+                if extport_raw.is_some() || mappedport_raw.is_some() {
+                    self.unsupported(
+                        format!("VIP `{name}` : `extport`/`mappedport` sans `portforward enable`"),
+                        &edit.span,
+                    );
+                    continue;
+                }
+                (None, None)
+            } else {
+                // FortiOS : `tcp` est le protocole par défaut de la
+                // redirection de ports (comportement documenté).
+                let proto: u8 = match protocol.as_deref() {
+                    None | Some("tcp") => 6,
+                    Some("udp") => 17,
+                    Some("sctp") => 132,
+                    Some(other) => {
+                        self.unsupported(
+                            format!(
+                                "protocole `{other}` non géré pour la redirection de ports du \
+                                 VIP `{name}`"
+                            ),
+                            &edit.span,
+                        );
+                        continue;
+                    }
+                };
+                let Some(extport_raw) = extport_raw else {
+                    self.unsupported(
+                        format!("VIP `{name}` : `portforward enable` sans `set extport`"),
+                        &edit.span,
+                    );
+                    continue;
+                };
+                let Some(ext) = values::parse_port_span(&extport_raw) else {
+                    self.unsupported(
+                        format!("`set extport` invalide dans le VIP `{name}`"),
+                        &edit.span,
+                    );
+                    continue;
+                };
+                // Sans `set mappedport`, FortiOS reprend `extport`
+                // (comportement documenté du produit).
+                let mapped = match &mappedport_raw {
+                    Some(raw) => match values::parse_port_span(raw) {
+                        Some(span) => span,
+                        None => {
+                            self.unsupported(
+                                format!("`set mappedport` invalide dans le VIP `{name}`"),
+                                &edit.span,
+                            );
+                            continue;
+                        }
+                    },
+                    None => ext,
+                };
+                let dport = PortRange {
+                    start: ext.0,
+                    end: ext.1,
+                };
+                let svc = Service {
+                    proto: ProtoMatch::Number(proto),
+                    sport: PortRange::ANY,
+                    dport,
+                };
+                if ext.0 == ext.1 {
+                    // Port unique : mappé exactement.
+                    if mapped.0 != mapped.1 {
+                        self.unsupported(
+                            format!(
+                                "VIP `{name}` : plage de ports traduite pour un port externe \
+                                 unique, non représentable"
+                            ),
+                            &edit.span,
+                        );
+                        continue;
+                    }
+                    (Some(mapped.0), Some(svc))
+                } else if mapped == ext {
+                    // Plage m-vers-n IDENTITAIRE : DNAT d'adresse seule,
+                    // le port est préservé — exact.
+                    (None, Some(svc))
+                } else {
+                    // Plage réellement décalée : `DnatTarget` ne porte
+                    // qu'un port unique — jamais approximée.
+                    self.unsupported(
+                        format!(
+                            "VIP `{name}` : plage de ports décalée non représentable (un seul \
+                             port cible par règle) — jamais approximée"
+                        ),
+                        &edit.span,
+                    );
+                    continue;
+                }
+            };
+
+            let oid = ObjectId::new(name.as_str());
+            if self.device.objects.addresses.contains_key(&oid) {
+                self.unsupported(
+                    format!(
+                        "VIP `{name}` redéfini (ou en collision avec un objet adresse) : la \
+                         nouvelle définition remplace la première"
+                    ),
+                    &edit.span,
+                );
+            }
+            // L'objet adresse du VIP : son adresse EXTERNE (c'est elle
+            // que les `dstaddr` des politiques désignent).
+            if let Ok(net) = ipnet::Ipv4Net::new(ext_start, 32) {
+                self.device
+                    .objects
+                    .addresses
+                    .insert(oid, AddrObject::Nets(vec![ipnet::IpNet::V4(net)]));
+            }
+            self.vips.insert(
+                name,
+                Vip {
+                    dnat: DnatTarget {
+                        addr: IpAddr::V4(mapped_start),
+                        port: dnat_port,
+                    },
+                    service,
+                },
+            );
+        }
+    }
+
+    // -- config firewall vipgrp -----------------------------------------
+
+    /// `config firewall vipgrp` : un groupe de VIP. Enregistré comme
+    /// groupe d'objets adresse (les références se résolvent) ET mémorisé
+    /// pour être développé en ses membres à l'évaluation des politiques
+    /// (chaque membre porte sa propre redirection).
+    fn vipgrp_block(&mut self, block: &ConfigNode) {
+        for edit in &block.children {
+            let Some(name) = self.edit_name(edit, "config firewall vipgrp") else {
+                continue;
+            };
+            let mut members: Vec<String> = Vec::new();
+            for d in &edit.children {
+                match (d.keyword.as_str(), d.arg(0)) {
+                    ("set", Some("member")) => {
+                        members = d.args[1..].to_vec();
+                    }
+                    ("set", Some("comment" | "color" | "uuid")) => {}
+                    _ => self.unsupported(
+                        format!(
+                            "`{}` non géré dans le groupe de VIP `{name}`",
+                            directive_excerpt(&d.keyword, &d.args, 1)
+                        ),
+                        &d.span,
+                    ),
+                }
+            }
+            for m in &members {
+                if !self.vips.contains_key(m) {
+                    self.note_warning(
+                        format!("le groupe de VIP `{name}` référence un VIP inconnu `{m}`"),
+                        &edit.span,
+                    );
+                }
+            }
+            let oid = ObjectId::new(name.as_str());
+            if self.device.objects.addresses.contains_key(&oid) {
+                self.unsupported(
+                    format!(
+                        "groupe de VIP `{name}` redéfini (ou en collision avec un objet \
+                         adresse) : la nouvelle définition remplace la première"
+                    ),
+                    &edit.span,
+                );
+            }
+            self.device.objects.addresses.insert(
+                oid,
+                AddrObject::Group(members.iter().map(ObjectId::new).collect()),
+            );
+            self.vipgrps.insert(name, members);
+        }
+    }
+
+    // -- config system sdwan --------------------------------------------
+
+    /// `config system sdwan` : zones et membres, pour développer les
+    /// routes `set sdwan-zone` en une route PAR MEMBRE (candidates ECMP,
+    /// évaluées par branches par le moteur — « l'un des WAN »).
+    ///
+    /// - `config health-check` : supervision de liens, sans effet sur le
+    ///   modèle statique → note Info ;
+    /// - `config service` (règles de routage par flux avec
+    ///   priority-members) : NON modélisé → diagnostic Warning explicite,
+    ///   la fidélité est dégradée (la sélection de membre par flux peut
+    ///   changer le chemin réel ; la route multi-membres reste correcte
+    ///   au sens « l'un des WAN »).
+    fn sdwan_block(&mut self, block: &ConfigNode) {
+        // La zone implicite de FortiOS existe dès que le SD-WAN est
+        // configuré (comportement documenté du produit).
+        self.sdwan_zones.insert(SDWAN_DEFAULT_ZONE.to_owned());
+        for d in &block.children {
+            match (d.keyword.as_str(), d.arg(0)) {
+                ("set", Some("status")) => match d.arg(1) {
+                    Some("enable") => self.sdwan_enabled = true,
+                    Some("disable") => {
+                        self.sdwan_enabled = false;
+                        self.note_info(
+                            "SD-WAN désactivé (`set status disable`) : zones et membres sans \
+                             effet"
+                                .to_owned(),
+                            &d.span,
+                        );
+                    }
+                    _ => self.unsupported(
+                        "`set status` invalide dans `config system sdwan`".to_owned(),
+                        &d.span,
+                    ),
+                },
+                ("config", Some("zone")) => self.sdwan_zone_block(d),
+                ("config", Some("members")) => self.sdwan_members_block(d),
+                ("config", Some("health-check")) => {
+                    for check in &d.children {
+                        match (check.keyword.as_str(), check.arg(0)) {
+                            ("edit", Some(name)) => self.note_info(
+                                format!(
+                                    "health-check SD-WAN `{name}` non modélisé : la \
+                                     supervision des liens n'affecte pas le modèle statique"
+                                ),
+                                &check.span,
+                            ),
+                            _ => self.unsupported(
+                                format!(
+                                    "directive `{}` non gérée dans `config health-check` \
+                                     (system sdwan)",
+                                    check.keyword
+                                ),
+                                &check.span,
+                            ),
+                        }
+                    }
+                }
+                ("config", Some("service")) => {
+                    for svc in &d.children {
+                        match (svc.keyword.as_str(), svc.arg(0)) {
+                            ("edit", Some(name)) => self.unsupported(
+                                format!(
+                                    "règle SD-WAN {name} non modélisée : la sélection de \
+                                     membre par flux n'est pas prise en compte"
+                                ),
+                                &svc.span,
+                            ),
+                            _ => self.unsupported(
+                                format!(
+                                    "directive `{}` non gérée dans `config service` \
+                                     (system sdwan)",
+                                    svc.keyword
+                                ),
+                                &svc.span,
+                            ),
+                        }
+                    }
+                }
+                _ => self.unsupported(
+                    format!(
+                        "`{}` non géré dans `config system sdwan`",
+                        directive_excerpt(&d.keyword, &d.args, 1)
+                    ),
+                    &d.span,
+                ),
+            }
+        }
+    }
+
+    /// `config zone` (system sdwan) : les noms de zones SD-WAN.
+    fn sdwan_zone_block(&mut self, block: &ConfigNode) {
+        for edit in &block.children {
+            let Some(name) = self.edit_name(edit, "config zone (system sdwan)") else {
+                continue;
+            };
+            for d in &edit.children {
+                self.unsupported(
+                    format!(
+                        "`{}` non géré dans la zone SD-WAN `{name}`",
+                        directive_excerpt(&d.keyword, &d.args, 1)
+                    ),
+                    &d.span,
+                );
+            }
+            self.sdwan_zones.insert(name);
+        }
+    }
+
+    /// `config members` (system sdwan) : interface + passerelle de chaque
+    /// membre, et sa zone d'appartenance.
+    fn sdwan_members_block(&mut self, block: &ConfigNode) {
+        for edit in &block.children {
+            let Some(label) = self.edit_name(edit, "config members (system sdwan)") else {
+                continue;
+            };
+            let mut iface: Option<IfaceId> = None;
+            let mut gateway: Option<IpAddr> = None;
+            let mut zone = SDWAN_DEFAULT_ZONE.to_owned();
+            let mut disabled = false;
+            let mut broken = false;
+            for d in &edit.children {
+                if d.keyword != "set" {
+                    self.unsupported(
+                        format!(
+                            "directive `{}` non gérée dans le membre SD-WAN {label}",
+                            d.keyword
+                        ),
+                        &d.span,
+                    );
+                    continue;
+                }
+                match d.arg(0) {
+                    Some("interface") => iface = d.arg(1).map(IfaceId::new),
+                    Some("gateway") => match d.arg(1).and_then(|v| v.parse().ok()) {
+                        Some(ip) => gateway = Some(ip),
+                        None => {
+                            self.unsupported(
+                                format!("passerelle invalide sur le membre SD-WAN {label}"),
+                                &d.span,
+                            );
+                            broken = true;
+                        }
+                    },
+                    Some("zone") => {
+                        if let Some(z) = d.arg(1) {
+                            zone = z.to_owned();
+                        }
+                    }
+                    Some("status") => disabled = d.arg(1) == Some("disable"),
+                    Some("comment") => {}
+                    // weight, cost, priority… : ils pilotent la sélection
+                    // de membre, non modélisée → chemin normal (§6.3).
+                    other => self.unsupported(
+                        format!(
+                            "`set {}` non géré sur le membre SD-WAN {label}",
+                            other.unwrap_or("")
+                        ),
+                        &d.span,
+                    ),
+                }
+            }
+            if disabled {
+                self.note_info(
+                    format!("membre SD-WAN {label} désactivé (`set status disable`) : ignoré"),
+                    &edit.span,
+                );
+                continue;
+            }
+            if broken {
+                continue;
+            }
+            let Some(iface) = iface else {
+                self.unsupported(
+                    format!("membre SD-WAN {label} sans `set interface`"),
+                    &edit.span,
+                );
+                continue;
+            };
+            if !self.device.interfaces.contains_key(&iface) {
+                self.note_warning(
+                    format!("le membre SD-WAN {label} référence une interface inconnue `{iface}`"),
+                    &edit.span,
+                );
+            }
+            self.sdwan_members.push(SdwanMember {
+                iface,
+                gateway,
+                zone,
+            });
+        }
+    }
+
+    // -- config vpn ipsec phase1-interface ------------------------------
+
+    /// `config vpn ipsec phase1-interface` : la passerelle distante et
+    /// l'interface parente sont des faits de TOPOLOGIE (le site distant
+    /// n'est pas dans le modèle) → note Info. L'interface tunnel du même
+    /// nom vient de `config system interface` (type tunnel).
+    ///
+    /// Chiffrement et négociation (`proposal`, `dhgrp`, `psksecret`…) :
+    /// compris et sans effet sur le filtrage — la valeur de `psksecret`
+    /// ne va JAMAIS dans un diagnostic (§11.4).
+    fn phase1_block(&mut self, block: &ConfigNode) {
+        for edit in &block.children {
+            let Some(name) = self.edit_name(edit, "config vpn ipsec phase1-interface") else {
+                continue;
+            };
+            let mut parent: Option<String> = None;
+            let mut remote_gw: Option<IpAddr> = None;
+            for d in &edit.children {
+                if d.keyword != "set" {
+                    self.unsupported(
+                        format!(
+                            "directive `{}` non gérée dans le tunnel IPsec `{name}`",
+                            d.keyword
+                        ),
+                        &d.span,
+                    );
+                    continue;
+                }
+                match d.arg(0) {
+                    Some("interface") => parent = d.arg(1).map(str::to_owned),
+                    Some("remote-gw") => match d.arg(1).and_then(|v| v.parse().ok()) {
+                        Some(ip) => remote_gw = Some(ip),
+                        None => self.unsupported(
+                            format!("`set remote-gw` invalide dans le tunnel IPsec `{name}`"),
+                            &d.span,
+                        ),
+                    },
+                    // Chiffrement/négociation : sans effet sur le
+                    // filtrage. La VALEUR de psksecret est un secret :
+                    // elle ne sort jamais dans un diagnostic.
+                    Some(
+                        "psksecret" | "proposal" | "dhgrp" | "ike-version" | "keylife"
+                        | "nattraversal" | "dpd" | "dpd-retrycount" | "dpd-retryinterval"
+                        | "peertype" | "comments",
+                    ) => {}
+                    other => self.unsupported(
+                        format!(
+                            "`set {}` non géré dans le tunnel IPsec `{name}`",
+                            other.unwrap_or("")
+                        ),
+                        &d.span,
+                    ),
+                }
+            }
+            if !self
+                .device
+                .interfaces
+                .contains_key(&IfaceId::new(name.as_str()))
+            {
+                self.note_warning(
+                    format!(
+                        "tunnel IPsec `{name}` sans interface tunnel du même nom \
+                         (`config system interface`)"
+                    ),
+                    &edit.span,
+                );
+            }
+            match (remote_gw, parent) {
+                (Some(gw), Some(itf)) => self.note_info(
+                    format!(
+                        "tunnel IPsec `{name}` : passerelle distante {gw} via `{itf}` \
+                         (topologie inter-sites non modélisée pour l'instant)"
+                    ),
+                    &edit.span,
+                ),
+                _ => self.note_info(
+                    format!(
+                        "tunnel IPsec `{name}` (topologie inter-sites non modélisée pour \
+                         l'instant)"
+                    ),
+                    &edit.span,
+                ),
+            }
+            self.phase1_names.insert(name);
+        }
+    }
+
+    // -- config vpn ipsec phase2-interface ------------------------------
+
+    /// `config vpn ipsec phase2-interface` : les SÉLECTEURS. Chaque
+    /// phase2 devient une règle d'une politique de SORTIE `ipsec:<T>`
+    /// (construite après la première passe, voir
+    /// [`Self::build_ipsec_policies`]).
+    fn phase2_block(&mut self, block: &ConfigNode) {
+        for edit in &block.children {
+            let Some(name) = self.edit_name(edit, "config vpn ipsec phase2-interface") else {
+                continue;
+            };
+            let mut phase1name: Option<String> = None;
+            let mut src: Option<Phase2Sel> = None;
+            let mut dst: Option<Phase2Sel> = None;
+            let mut broken = false;
+            for d in &edit.children {
+                if d.keyword != "set" {
+                    self.unsupported(
+                        format!(
+                            "directive `{}` non gérée dans le sélecteur phase2 `{name}`",
+                            d.keyword
+                        ),
+                        &d.span,
+                    );
+                    continue;
+                }
+                match d.arg(0) {
+                    Some("phase1name") => phase1name = d.arg(1).map(str::to_owned),
+                    Some(key @ ("src-name" | "dst-name")) => match d.arg(1) {
+                        Some(obj) => {
+                            let sel = Some(Phase2Sel::Name(obj.to_owned()));
+                            if key == "src-name" {
+                                src = sel;
+                            } else {
+                                dst = sel;
+                            }
+                        }
+                        None => {
+                            self.unsupported(
+                                format!("`set {key}` sans objet dans le sélecteur phase2 `{name}`"),
+                                &d.span,
+                            );
+                            broken = true;
+                        }
+                    },
+                    Some(key @ ("src-subnet" | "dst-subnet")) => {
+                        match values::ip_mask_to_net(d.arg(1).unwrap_or(""), d.arg(2)) {
+                            Some(net) => {
+                                let sel = Some(Phase2Sel::Subnet(net.trunc()));
+                                if key == "src-subnet" {
+                                    src = sel;
+                                } else {
+                                    dst = sel;
+                                }
+                            }
+                            None => {
+                                self.unsupported(
+                                    format!(
+                                        "`set {key}` invalide dans le sélecteur phase2 `{name}`"
+                                    ),
+                                    &d.span,
+                                );
+                                broken = true;
+                            }
+                        }
+                    }
+                    // Chiffrement/négociation : sans effet sur les
+                    // sélecteurs.
+                    Some(
+                        "proposal" | "pfs" | "dhgrp" | "keylifeseconds" | "keylife-type"
+                        | "auto-negotiate" | "keepalive" | "replay" | "comments",
+                    ) => {}
+                    other => self.unsupported(
+                        format!(
+                            "`set {}` non géré dans le sélecteur phase2 `{name}`",
+                            other.unwrap_or("")
+                        ),
+                        &d.span,
+                    ),
+                }
+            }
+            if broken {
+                continue;
+            }
+            let Some(phase1name) = phase1name else {
+                self.unsupported(
+                    format!("sélecteur phase2 `{name}` sans `set phase1name`"),
+                    &edit.span,
+                );
+                continue;
+            };
+            self.pending_phase2.push(PendingPhase2 {
+                name,
+                phase1name,
+                src,
+                dst,
+                span: edit.span.clone(),
+            });
+        }
+    }
+
+    /// Construit les politiques `ipsec:<tunnel>` à partir des sélecteurs
+    /// phase2, une fois la première passe terminée.
+    ///
+    /// Sémantique modélisée (celle du produit) : sur l'interface tunnel,
+    /// le FortiGate ne chiffre QUE le trafic qui correspond à un
+    /// sélecteur phase2 et JETTE le reste. C'est donc un vrai filtre de
+    /// SORTIE : une politique `ipsec:<T>` accrochée en `egress`, une
+    /// règle Accept par sélecteur (zone `to` = l'interface tunnel `T`),
+    /// `default_action = Deny`.
+    ///
+    /// Un sélecteur absent (`src-name`/`src-subnet` non posés) est
+    /// `0.0.0.0/0` chez FortiOS : dimension laissée vide (= Any).
+    fn build_ipsec_policies(&mut self) {
+        let pending = std::mem::take(&mut self.pending_phase2);
+        // Zone du tunnel de chaque politique ipsec:<T>, pour la règle
+        // finale de rejet (une par politique, APRÈS tous les sélecteurs).
+        let mut deny_scopes: Vec<(PolicyId, Option<ZoneId>, SourceSpan)> = Vec::new();
+        for p2 in pending {
+            if !self.phase1_names.contains(&p2.phase1name) {
+                self.note_warning(
+                    format!(
+                        "sélecteur phase2 `{}` : tunnel phase1 `{}` inconnu",
+                        p2.name, p2.phase1name
+                    ),
+                    &p2.span,
+                );
+            }
+            let to = self.zone_ref(std::slice::from_ref(&p2.phase1name), &p2.span, "phase1name");
+            let src = self.phase2_sel_exprs(p2.src, &p2.span);
+            let dst = self.phase2_sel_exprs(p2.dst, &p2.span);
+            let pid = PolicyId::new(format!("ipsec:{}", p2.phase1name));
+            let policy = self
+                .device
+                .policies
+                .entry(pid.clone())
+                .or_insert_with(|| Policy {
+                    id: pid.clone(),
+                    rules: Vec::new(),
+                    // ACCEPT par défaut : dans le pipeline de sortie
+                    // CHAÎNÉ du moteur, cette politique voit AUSSI le
+                    // trafic qui ne sort pas par le tunnel — un défaut
+                    // Deny refuserait tout le reste. Le comportement
+                    // FortiGate (« ce qui ne matche aucun sélecteur est
+                    // jeté ») est porté par la règle finale
+                    // `ipsec-implicit-deny`, SCOPÉE à la zone du tunnel.
+                    default_action: Action::Accept,
+                });
+            if !deny_scopes.iter().any(|(id, _, _)| *id == pid) {
+                deny_scopes.push((pid.clone(), to.clone(), p2.span.clone()));
+            }
+            policy.rules.push(Rule {
+                id: RuleId::new(p2.name),
+                matches: RuleMatch {
+                    src,
+                    dst,
+                    services: Vec::new(),
+                },
+                from: None,
+                to,
+                action: Action::Accept,
+                source: p2.span,
+            });
+            if !self.device.pipeline.egress.contains(&pid) {
+                self.device.pipeline.egress.push(pid);
+            }
+        }
+        // Le rejet implicite du tunnel : tout ce qui SORT PAR LE TUNNEL
+        // sans matcher un sélecteur est jeté (sémantique FortiGate),
+        // le reste du trafic n'est pas concerné. Si un sélecteur couvre
+        // déjà tout (Any/Any — tunnels nomades en mode-cfg), le rejet
+        // serait inatteignable par construction : on ne l'ajoute pas,
+        // sinon `dead-rules` le signalerait à tort comme une anomalie de
+        // la configuration analysée.
+        for (pid, to, span) in deny_scopes {
+            if let Some(policy) = self.device.policies.get_mut(&pid) {
+                let un_selecteur_couvre_tout = policy.rules.iter().any(|r| {
+                    r.matches.src.is_empty()
+                        && r.matches.dst.is_empty()
+                        && r.matches.services.is_empty()
+                });
+                if un_selecteur_couvre_tout {
+                    continue;
+                }
+                policy.rules.push(Rule {
+                    id: RuleId::new("ipsec-implicit-deny"),
+                    matches: RuleMatch::default(),
+                    from: None,
+                    to,
+                    action: Action::Deny,
+                    source: span,
+                });
+            }
+        }
+    }
+
+    /// Un sélecteur phase2 → expressions d'adresse (vide = Any).
+    fn phase2_sel_exprs(&mut self, sel: Option<Phase2Sel>, span: &SourceSpan) -> Vec<AddrExpr> {
+        match sel {
+            None => Vec::new(),
+            Some(Phase2Sel::Subnet(net)) => vec![AddrExpr::Net(net)],
+            Some(Phase2Sel::Name(name)) => self.addr_exprs(&[name], span),
         }
     }
 
@@ -978,21 +2107,136 @@ impl Converter {
                 }
             };
 
-            let matches = RuleMatch {
-                src: self.addr_exprs(&srcaddr, &span),
-                dst: self.addr_exprs(&dstaddr, &span),
-                services: self.service_exprs(&service, &span),
-            };
+            let src = self.addr_exprs(&srcaddr, &span);
+            let services = self.service_exprs(&service, &span);
 
-            rules.push(Rule {
-                id: RuleId::new(num),
-                matches,
-                from,
-                to,
-                action,
-                // Le span du `edit N` : fichier + ligne (+ ligne du `next`).
-                source: span,
-            });
+            // Destinations VIP : quand la règle ACCEPTE vers un VIP (ou
+            // un groupe de VIP), elle porte la redirection (DNAT). Un
+            // refus vers un VIP ne traduit rien : chemin normal.
+            let mut vip_parts: Vec<String> = Vec::new();
+            let mut autres: Vec<String> = Vec::new();
+            if matches!(action, Action::Deny) {
+                autres = dstaddr.clone();
+            } else {
+                for dname in &dstaddr {
+                    if let Some(members) = self.vipgrps.get(dname).cloned() {
+                        for m in members {
+                            if self.vips.contains_key(&m) {
+                                vip_parts.push(m);
+                            } else {
+                                self.unsupported(
+                                    format!(
+                                        "politique {num} : le groupe de VIP `{dname}` référence \
+                                         un VIP inconnu `{m}` — redirection irrésoluble"
+                                    ),
+                                    &span,
+                                );
+                            }
+                        }
+                    } else if self.vips.contains_key(dname) {
+                        vip_parts.push(dname.clone());
+                    } else {
+                        autres.push(dname.clone());
+                    }
+                }
+            }
+
+            if vip_parts.is_empty() {
+                rules.push(Rule {
+                    id: RuleId::new(num),
+                    matches: RuleMatch {
+                        src,
+                        dst: self.addr_exprs(&autres, &span),
+                        services,
+                    },
+                    from,
+                    to,
+                    action,
+                    // Le span du `edit N` : fichier + ligne (+ ligne du `next`).
+                    source: span,
+                });
+                continue;
+            }
+
+            // Plusieurs destinations externes aux cibles DIFFÉRENTES ne
+            // tiennent pas dans un seul `DnatTarget` : la règle est
+            // ÉCLATÉE en une règle par VIP (identifiants suffixés
+            // `<n>:<vip>`, même span — exact et traçable), les
+            // destinations non-VIP gardant l'identifiant d'origine.
+            let multi = vip_parts.len() + usize::from(!autres.is_empty()) > 1;
+            if multi {
+                self.note_info(
+                    format!(
+                        "politique {num} éclatée en {} règles : une par VIP référencé \
+                         (identifiants suffixés `{num}:<vip>`), chaque destination externe \
+                         ayant sa propre cible de redirection",
+                        vip_parts.len() + usize::from(!autres.is_empty())
+                    ),
+                    &span,
+                );
+            }
+            // `set nat enable` éventuel : la part de SNAT existante est
+            // conservée et le DNAT du VIP s'y ajoute.
+            let base_nat = match &action {
+                Action::Nat(nat) => nat.clone(),
+                _ => NatAction::default(),
+            };
+            for vip_name in &vip_parts {
+                let Some(vip) = self.vips.get(vip_name).cloned() else {
+                    continue; // filtré ci-dessus, jamais atteint.
+                };
+                // `set protocol`/`set extport` du VIP contraignent le
+                // service de la règle. Un service explicite ne peut pas
+                // être intersecté avec cette contrainte dans le modèle :
+                // diagnostic, jamais une approximation silencieuse.
+                let rule_services = match &vip.service {
+                    Some(svc) if is_any_services(&services) => vec![ServiceExpr::Service(*svc)],
+                    Some(_) => {
+                        self.unsupported(
+                            format!(
+                                "politique {num} : service explicite combiné à la redirection \
+                                 de ports du VIP `{vip_name}` — intersection non représentable, \
+                                 la restriction de port du VIP n'est pas appliquée"
+                            ),
+                            &span,
+                        );
+                        services.clone()
+                    }
+                    None => services.clone(),
+                };
+                rules.push(Rule {
+                    id: if multi {
+                        RuleId::new(format!("{num}:{vip_name}"))
+                    } else {
+                        RuleId::new(num.as_str())
+                    },
+                    matches: RuleMatch {
+                        src: src.clone(),
+                        dst: vec![AddrExpr::Object(ObjectId::new(vip_name.as_str()))],
+                        services: rule_services,
+                    },
+                    from: from.clone(),
+                    to: to.clone(),
+                    action: Action::Nat(NatAction {
+                        snat: base_nat.snat,
+                        dnat: Some(vip.dnat),
+                    }),
+                    source: span.clone(),
+                });
+            }
+            if !autres.is_empty() {
+                // Les destinations non-VIP de la même règle : pas de
+                // redirection pour elles (comportement du produit).
+                let dst = self.addr_exprs(&autres, &span);
+                rules.push(Rule {
+                    id: RuleId::new(num),
+                    matches: RuleMatch { src, dst, services },
+                    from,
+                    to,
+                    action,
+                    source: span,
+                });
+            }
         }
 
         let pid = PolicyId::new(FORWARD_POLICY);
@@ -1127,6 +2371,14 @@ impl Converter {
     }
 }
 
+/// `set service "ALL"` (ou aucune contrainte) : le service de la règle
+/// est « tout » — la contrainte de port d'un VIP peut alors le remplacer
+/// EXACTEMENT (l'intersection de « tout » avec la contrainte, c'est la
+/// contrainte).
+fn is_any_services(services: &[ServiceExpr]) -> bool {
+    matches!(services, [] | [ServiceExpr::Any])
+}
+
 fn is_policy_block(node: &ConfigNode) -> bool {
     node.keyword == "config"
         && node.args.len() == 2
@@ -1258,6 +2510,279 @@ mod tests {
         assert!(unsupported
             .iter()
             .any(|d| d.message.contains("SRV") && d.message.contains("redéfini")));
+    }
+
+    /// Une route par objet GROUPE se développe en une route par préfixe
+    /// résolu ; la combinaison `dstaddr` + `blackhole` rejette chaque
+    /// préfixe.
+    #[test]
+    fn route_par_objet_groupe_et_blackhole() {
+        let out = import(
+            "config firewall address\n    edit \"A\"\n        \
+             set subnet 10.1.0.0 255.255.0.0\n    next\n    edit \"B\"\n        \
+             set subnet 10.2.0.0 255.255.0.0\n    next\nend\n\
+             config firewall addrgrp\n    edit \"G\"\n        \
+             set member \"A\" \"B\"\n    next\nend\n\
+             config router static\n    edit 1\n        \
+             set dstaddr \"G\"\n        set blackhole enable\n    next\nend\n",
+        );
+        assert_eq!(out.fidelity, Fidelity::Complete);
+        let routes = &out.device.vrfs[&VrfId::default_vrf()].routes;
+        assert_eq!(routes.len(), 2);
+        assert_eq!(routes[0].prefix, "10.1.0.0/16".parse().unwrap());
+        assert_eq!(routes[0].next_hop, NextHop::Drop);
+        assert_eq!(routes[1].prefix, "10.2.0.0/16".parse().unwrap());
+        assert_eq!(routes[1].next_hop, NextHop::Drop);
+    }
+
+    /// Une route par objet irrésoluble (objet absent : fqdn, géographie…)
+    /// ne produit AUCUNE route et dégrade la fidélité — jamais devinée.
+    #[test]
+    fn route_par_objet_irresoluble_diagnostiquee() {
+        let out = import(
+            "config router static\n    edit 1\n        \
+             set dstaddr \"OBJET-FANTOME\"\n        set gateway 10.0.0.1\n    next\nend\n",
+        );
+        assert!(out
+            .device
+            .vrfs
+            .get(&VrfId::default_vrf())
+            .is_none_or(|v| v.routes.is_empty()));
+        let Fidelity::Partial { unsupported } = &out.fidelity else {
+            panic!("objet irrésoluble → fidélité dégradée");
+        };
+        assert!(unsupported
+            .iter()
+            .any(|d| d.message.contains("OBJET-FANTOME") && d.message.contains("irrésoluble")));
+    }
+
+    /// Une route `sdwan-zone` vers une zone inconnue (ou sans bloc
+    /// `config system sdwan`) est diagnostiquée, jamais devinée.
+    #[test]
+    fn route_sdwan_zone_inconnue_diagnostiquee() {
+        let out = import(
+            "config system sdwan\n    set status enable\nend\n\
+             config router static\n    edit 1\n        \
+             set sdwan-zone \"ZONE-X\"\n    next\nend\n",
+        );
+        let Fidelity::Partial { unsupported } = &out.fidelity else {
+            panic!("zone inconnue → fidélité dégradée");
+        };
+        assert!(unsupported
+            .iter()
+            .any(|d| d.message.contains("ZONE-X") && d.message.contains("inconnue")));
+    }
+
+    /// Les `config service` SD-WAN (sélection de membre par flux) ne sont
+    /// pas modélisés : diagnostic Warning EXPLICITE, fidélité dégradée —
+    /// la route multi-membres reste correcte au sens « l'un des WAN ».
+    #[test]
+    fn regle_sdwan_service_non_modelisee_diagnostiquee() {
+        let out = import(
+            "config system sdwan\n    set status enable\n    config service\n        \
+             edit 1\n            set priority-members 2 1\n        next\n    end\nend\n",
+        );
+        let Fidelity::Partial { unsupported } = &out.fidelity else {
+            panic!("règle SD-WAN → fidélité dégradée");
+        };
+        assert!(unsupported.iter().any(|d| d
+            .message
+            .contains("règle SD-WAN 1 non modélisée : la sélection de membre par flux")));
+    }
+
+    /// Un membre SD-WAN sans passerelle route sur son interface (comme
+    /// une route statique `device` seule).
+    #[test]
+    fn membre_sdwan_sans_passerelle_route_sur_l_interface() {
+        let out = import(
+            "config system interface\n    edit \"wan1\"\n        \
+             set ip 192.0.2.1 255.255.255.252\n    next\nend\n\
+             config system sdwan\n    set status enable\n    config members\n        \
+             edit 1\n            set interface \"wan1\"\n        next\n    end\nend\n\
+             config router static\n    edit 1\n        \
+             set sdwan-zone \"virtual-wan-link\"\n    next\nend\n",
+        );
+        assert_eq!(out.fidelity, Fidelity::Complete);
+        let routes = &out.device.vrfs[&VrfId::default_vrf()].routes;
+        assert_eq!(routes.len(), 1);
+        assert_eq!(routes[0].next_hop, NextHop::Interface(IfaceId::new("wan1")));
+    }
+
+    /// Un VIP à plage de ports IDENTITAIRE (extport == mappedport) est un
+    /// DNAT d'adresse seule : le port est préservé — exact.
+    #[test]
+    fn vip_plage_de_ports_identitaire_dnat_adresse_seule() {
+        let out = import(
+            "config firewall vip\n    edit \"V\"\n        set extip 192.0.2.10\n        \
+             set portforward enable\n        set mappedip \"10.0.0.10\"\n        \
+             set extport 8000-8010\n        set mappedport 8000-8010\n    next\nend\n\
+             config firewall policy\n    edit 1\n        set dstaddr \"V\"\n        \
+             set action accept\n        set service \"ALL\"\n    next\nend\n",
+        );
+        assert_eq!(out.fidelity, Fidelity::Complete);
+        let policy = &out.device.policies[&PolicyId::new(FORWARD_POLICY)];
+        let r = &policy.rules[0];
+        assert_eq!(r.id.as_str(), "1");
+        assert_eq!(
+            r.matches.services,
+            vec![calque_model::ServiceExpr::Service(Service::tcp_dport(
+                calque_model::PortRange {
+                    start: 8000,
+                    end: 8010
+                }
+            ))]
+        );
+        assert_eq!(
+            r.action,
+            Action::Nat(NatAction {
+                snat: None,
+                dnat: Some(DnatTarget {
+                    addr: "10.0.0.10".parse().unwrap(),
+                    port: None,
+                }),
+            })
+        );
+    }
+
+    /// Un VIP à plage de ports réellement DÉCALÉE n'est pas représentable
+    /// (`DnatTarget` porte un port unique) : diagnostic, le VIP n'existe
+    /// pas et la règle qui le référence devient irrésoluble — jamais
+    /// approximée.
+    #[test]
+    fn vip_plage_de_ports_decalee_jamais_approximee() {
+        let out = import(
+            "config firewall vip\n    edit \"V\"\n        set extip 192.0.2.10\n        \
+             set portforward enable\n        set mappedip \"10.0.0.10\"\n        \
+             set extport 8000-8010\n        set mappedport 9000-9010\n    next\nend\n\
+             config firewall policy\n    edit 1\n        set dstaddr \"V\"\n        \
+             set action accept\n    next\nend\n",
+        );
+        assert!(!out
+            .device
+            .objects
+            .addresses
+            .contains_key(&ObjectId::new("V")));
+        let Fidelity::Partial { unsupported } = &out.fidelity else {
+            panic!("plage décalée → fidélité dégradée");
+        };
+        assert!(unsupported
+            .iter()
+            .any(|d| d.message.contains("plage de ports décalée")));
+        assert!(
+            unsupported
+                .iter()
+                .any(|d| d.message.contains("`V` introuvable")),
+            "la règle qui référence le VIP écarté est irrésoluble : {unsupported:?}"
+        );
+    }
+
+    /// Une plage d'adresses externes (`set extip a-b`) exigerait une
+    /// cible DNAT par adresse : non représentable, diagnostiquée.
+    #[test]
+    fn vip_plage_d_adresses_externes_jamais_approximee() {
+        let out = import(
+            "config firewall vip\n    edit \"V\"\n        \
+             set extip 192.0.2.10-192.0.2.12\n        \
+             set mappedip \"10.0.0.10-10.0.0.12\"\n    next\nend\n",
+        );
+        let Fidelity::Partial { unsupported } = &out.fidelity else {
+            panic!("plage d'adresses externes → fidélité dégradée");
+        };
+        assert!(unsupported
+            .iter()
+            .any(|d| d.message.contains("plage d'adresses externes")));
+    }
+
+    /// Un service EXPLICITE combiné à la restriction de port d'un VIP ne
+    /// s'intersecte pas dans le modèle : le service de la règle est
+    /// conservé et la restriction du VIP est diagnostiquée — jamais une
+    /// approximation silencieuse.
+    #[test]
+    fn vip_et_service_explicite_diagnostiques() {
+        let out = import(
+            "config firewall service custom\n    edit \"TCP-9\"\n        \
+             set tcp-portrange 9\n    next\nend\n\
+             config firewall vip\n    edit \"V\"\n        set extip 192.0.2.10\n        \
+             set portforward enable\n        set mappedip \"10.0.0.10\"\n        \
+             set extport 443\n        set mappedport 443\n    next\nend\n\
+             config firewall policy\n    edit 1\n        set dstaddr \"V\"\n        \
+             set action accept\n        set service \"TCP-9\"\n    next\nend\n",
+        );
+        let policy = &out.device.policies[&PolicyId::new(FORWARD_POLICY)];
+        let r = &policy.rules[0];
+        // Le service de la règle est conservé tel quel…
+        assert_eq!(
+            r.matches.services,
+            vec![calque_model::ServiceExpr::Object(ObjectId::new("TCP-9"))]
+        );
+        // …et l'impossibilité d'intersecter est diagnostiquée.
+        let Fidelity::Partial { unsupported } = &out.fidelity else {
+            panic!("intersection non représentable → fidélité dégradée");
+        };
+        assert!(unsupported
+            .iter()
+            .any(|d| d.message.contains("intersection non représentable")));
+    }
+
+    /// Un REFUS vers un VIP ne traduit rien (le DNAT n'est porté que par
+    /// les règles qui acceptent) : la destination se résout sur l'adresse
+    /// externe, l'action reste Deny.
+    #[test]
+    fn refus_vers_un_vip_sans_dnat() {
+        let out = import(
+            "config firewall vip\n    edit \"V\"\n        set extip 192.0.2.10\n        \
+             set mappedip \"10.0.0.10\"\n    next\nend\n\
+             config firewall policy\n    edit 1\n        set dstaddr \"V\"\n        \
+             set action deny\n    next\nend\n",
+        );
+        assert_eq!(out.fidelity, Fidelity::Complete);
+        let policy = &out.device.policies[&PolicyId::new(FORWARD_POLICY)];
+        let r = &policy.rules[0];
+        assert_eq!(r.action, Action::Deny);
+        assert_eq!(r.matches.dst, vec![AddrExpr::Object(ObjectId::new("V"))]);
+    }
+
+    /// `set nat enable` + VIP : la règle porte le DNAT du VIP fusionné
+    /// avec la part de SNAT (cible résolue tardivement, convention de
+    /// l'adaptateur).
+    #[test]
+    fn nat_enable_et_vip_fusionnes() {
+        let out = import(
+            "config firewall vip\n    edit \"V\"\n        set extip 192.0.2.10\n        \
+             set mappedip \"10.0.0.10\"\n    next\nend\n\
+             config firewall policy\n    edit 1\n        set dstaddr \"V\"\n        \
+             set action accept\n        set nat enable\n    next\nend\n",
+        );
+        assert_eq!(out.fidelity, Fidelity::Complete);
+        let policy = &out.device.policies[&PolicyId::new(FORWARD_POLICY)];
+        assert_eq!(
+            policy.rules[0].action,
+            Action::Nat(NatAction {
+                snat: None,
+                dnat: Some(DnatTarget {
+                    addr: "10.0.0.10".parse().unwrap(),
+                    port: None,
+                }),
+            })
+        );
+    }
+
+    /// La valeur d'un `psksecret` ne sort JAMAIS dans un diagnostic, même
+    /// quand le tunnel porte par ailleurs une directive inconnue.
+    #[test]
+    fn psksecret_jamais_dans_les_diagnostics() {
+        let out = import(
+            "config vpn ipsec phase1-interface\n    edit \"t1\"\n        \
+             set interface \"wan\"\n        set remote-gw 192.0.2.99\n        \
+             set psksecret ENC ULTRASECRET==\n        \
+             set gadget-exotique enable\n    next\nend\n",
+        );
+        let msgs = all_messages(&out);
+        assert!(
+            msgs.iter().any(|m| m.contains("gadget-exotique")),
+            "{msgs:?}"
+        );
+        assert!(msgs.iter().all(|m| !m.contains("ULTRASECRET")), "{msgs:?}");
     }
 
     /// Les objets auto-créés `type interface-subnet` (omniprésents dans

@@ -218,6 +218,15 @@ pub struct TestArgs {
     /// Format de sortie
     #[arg(long, value_enum, default_value_t = OutputFormat::Text)]
     pub format: OutputFormat,
+
+    /// Rendre les verdicts même sur un modèle PARTIEL (une configuration
+    /// réelle l'est presque toujours : VPN, SD-WAN, profils UTM non
+    /// modélisés). Sans ce drapeau, tout flux traversant un équipement à
+    /// fidélité partielle est compté en échec « verdict non ferme »
+    /// (§6.3). Avec, les verdicts s'appuient sur la partie modélisée —
+    /// un avertissement le rappelle sur stderr.
+    #[arg(long)]
+    pub allow_partial: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]

@@ -247,4 +247,56 @@ mod tests {
         assert!(report.flows.is_empty());
         assert!(!report.diagnostics.is_empty());
     }
+
+    /// Une cible EXTERNE au modèle est atteignable « en sortie de
+    /// périmètre » : `reach_to` la trouve fermement (décision `ExitsModel`
+    /// dans la chaîne), et chaque exemple est confirmé par le moteur
+    /// concret.
+    #[test]
+    fn reach_to_cible_externe_en_sortie_de_perimetre() {
+        use crate::testutil::{single_device_network, with_fw_egress};
+        use crate::trace::Outcome;
+
+        let network = with_fw_egress(
+            single_device_network(),
+            vec![rule(
+                "10",
+                vec![AddrExpr::Net(net("10.0.10.0/24"))],
+                vec![],
+                vec![tcp_svc(443)],
+                None,
+                None,
+                Action::Accept,
+                100,
+            )],
+            Action::Deny,
+        );
+        let target = HeaderSet::from_cube(Cube::new(
+            PrefixSet::full(),
+            PrefixSet::from_net(net("203.0.113.50/32")),
+            ProtoSet::single(6),
+            PortRanges::full(),
+            PortRanges::single(443),
+        ));
+        let report = reach_to(&network, &target);
+        let lan = Endpoint {
+            device: DeviceId::new("fw"),
+            iface: IfaceId::new("lan"),
+        };
+        let from_lan: Vec<&ReachFlow> = report.flows.iter().filter(|f| f.entry == lan).collect();
+        assert!(!from_lan.is_empty(), "la cible externe doit être atteinte");
+        for f in &from_lan {
+            assert_eq!(trace_packet(&network, &f.sample).verdict, Verdict::Allowed);
+            // La chaîne dit explicitement la sortie de périmètre.
+            assert!(f
+                .decisions
+                .iter()
+                .any(|d| matches!(d.decision.outcome, Outcome::ExitsModel { .. })));
+        }
+        // Le rapport est ferme : aucune part indécidable en erreur.
+        assert!(!report
+            .diagnostics
+            .iter()
+            .any(|d| d.severity == calque_model::Severity::Error));
+    }
 }

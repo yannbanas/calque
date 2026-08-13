@@ -341,7 +341,7 @@ fn collect_messages(before: &Trace, after: &Trace) -> Vec<String> {
 
 /// Une décision porte-t-elle le verdict (par opposition aux décisions
 /// informationnelles `Matched`/`NoMatch`/`RouteFound`/`Rewritten`) ?
-fn is_decisive(outcome: Outcome) -> bool {
+fn is_decisive(outcome: &Outcome) -> bool {
     matches!(
         outcome,
         Outcome::Accepted
@@ -359,7 +359,7 @@ fn justification(trace: &Trace) -> Justification {
         .hops
         .iter()
         .flat_map(|h| &h.decisions)
-        .rfind(|d| is_decisive(d.outcome));
+        .rfind(|d| is_decisive(&d.outcome));
     Justification {
         status: trace.verdict.into(),
         rule: decisive.and_then(|d| d.rule.clone()),

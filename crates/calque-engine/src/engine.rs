@@ -5,8 +5,31 @@
 //!
 //! Arrêts : refus (règle responsable), pas de route, boucle (équipement déjà
 //! visité), destination atteinte (adresse portée par un équipement, ou sortie
-//! vers un réseau directement connecté qui la contient), ou `Unknown` quand
-//! un élément du chemin manque ou est ambigu (§6.3 : ne jamais deviner).
+//! vers un réseau directement connecté qui la contient), SORTIE DE PÉRIMÈTRE
+//! (voir ci-dessous), ou `Unknown` quand un élément du chemin manque ou est
+//! ambigu (§6.3 : ne jamais deviner).
+//!
+//! Sortie de périmètre (critère précis, documenté) : quand la décision de
+//! routage donne une interface de sortie et que
+//! 1. la destination n'appartient à AUCUN équipement du modèle (aucune
+//!    interface active ne porte un réseau la contenant), ET
+//! 2. l'interface de sortie n'a AUCUN lien,
+//!
+//! alors le paquet SORT du périmètre modélisé (Internet via une interface
+//! WAN, site distant via un tunnel sans adresse ni lien…). L'équipement a
+//! tranché : le verdict est celui des filtres (`Allowed` s'ils ont accepté),
+//! avec une décision `Outcome::ExitsModel` explicite. Si la destination
+//! appartient au périmètre (équipement ou réseau modélisé) mais est
+//! injoignable, c'est un vrai trou de topologie INTERNE : le comportement
+//! historique est conservé (« topologie incomplète » → `Unknown`).
+//!
+//! ECMP (plusieurs routes optimales divergentes) : chaque route candidate
+//! est évaluée comme une BRANCHE complète (filtres de sortie, SNAT, lien ou
+//! sortie de périmètre, équipements suivants). Si toutes les branches mènent
+//! au même verdict, ce verdict est ferme (« ne jamais deviner » ≠ « ne
+//! jamais répondre ») ; sinon `Unknown` avec le verdict de chaque branche en
+//! diagnostic. Bornes : [`crate::route::MAX_ECMP_ROUTES`] par recherche,
+//! [`MAX_ECMP_TOTAL_BRANCHES`] en cumulé sur la trace.
 
 use std::collections::BTreeSet;
 use std::net::IpAddr;
@@ -19,20 +42,35 @@ use ipnet::IpNet;
 
 use crate::error::EvalError;
 use crate::policy::{evaluate_policy, FilterPoint, FilterResult, NatGrant};
-use crate::route::{lookup_route, RouteDecision};
+use crate::route::{lookup_route, EcmpRoute, RouteDecision};
 use crate::trace::{Decision, Hop, Outcome, Stage, Trace, Verdict};
 
-/// Résultat de la traversée d'un seul équipement.
-enum DeviceOutcome {
+/// Borne CUMULÉE de branches ECMP évaluées sur une même trace : une branche
+/// peut elle-même rencontrer un ECMP (bifurcation récursive), et chaque
+/// embranchement consomme autant de budget que de routes candidates.
+/// Budget épuisé → verdict `Unknown` diagnostiqué, jamais une évaluation
+/// partielle silencieuse. Voir aussi [`crate::route::MAX_ECMP_ROUTES`]
+/// (borne PAR recherche de route).
+pub const MAX_ECMP_TOTAL_BRANCHES: usize = 16;
+
+/// Résultat de la traversée d'un équipement JUSQU'À la décision de routage
+/// (filtres d'entrée, DNAT, livraison locale, recherche de route). Les
+/// filtres de sortie restent à évaluer PAR interface candidate — c'est ce
+/// qui permet l'évaluation par branches de l'ECMP.
+enum DeviceStep {
     Denied,
     /// L'équipement porte l'adresse destination : livraison locale.
     LocalDelivery,
-    /// Le paquet ressort par cette interface.
-    Forwarded {
-        out_iface: IfaceId,
-    },
     /// Aucune route (ou route de rejet, documentée dans les décisions).
     NoRoute,
+    /// Routage décidé : une candidate en temps normal, plusieurs en ECMP.
+    Routed {
+        candidates: Vec<EcmpRoute>,
+        /// SNAT accordé à l'entrée mais différé (appliqué après le filtre
+        /// de sortie de la branche).
+        pending_snat: Option<NatGrant>,
+        in_zone: Option<ZoneId>,
+    },
 }
 
 /// Point d'entrée localisé pour la source.
@@ -152,13 +190,8 @@ fn locate_source(network: &Network, src: &IpAddr) -> Result<EntryPoint, Diagnost
     }
 }
 
-/// Le lien physique partant de (équipement, interface). Aucun lien ou liens
-/// multiples → diagnostic (topologie incomplète ou ambiguë).
-fn find_link<'a>(
-    network: &'a Network,
-    device: &DeviceId,
-    iface: &IfaceId,
-) -> Result<&'a Endpoint, Diagnostic> {
+/// Les extrémités distantes des liens partant de (équipement, interface).
+fn links_from<'a>(network: &'a Network, device: &DeviceId, iface: &IfaceId) -> Vec<&'a Endpoint> {
     let mut peers: Vec<&Endpoint> = Vec::new();
     for link in &network.links {
         if link.a.device == *device && link.a.iface == *iface {
@@ -167,17 +200,23 @@ fn find_link<'a>(
             peers.push(&link.a);
         }
     }
-    match peers.len() {
-        0 => Err(Diagnostic::error(
-            format!("topologie incomplète : aucun lien depuis {device}/{iface}"),
-            None,
-        )),
-        1 => Ok(peers[0]),
-        _ => Err(Diagnostic::error(
-            format!("topologie ambiguë : plusieurs liens depuis {device}/{iface}"),
-            None,
-        )),
-    }
+    peers
+}
+
+/// La destination appartient-elle au périmètre modélisé ? Vraie si une
+/// interface ACTIVE d'un équipement du modèle porte un réseau qui la
+/// contient (donc en particulier si un équipement porte l'adresse exacte).
+/// C'est la moitié « destination » du critère de sortie de périmètre (voir
+/// l'en-tête du module) — l'autre moitié étant l'absence de lien depuis
+/// l'interface de sortie. Volontairement PRUDENT : une destination couverte
+/// par un réseau modélisé mais injoignable reste un trou de topologie
+/// interne (`Unknown`), jamais une sortie de périmètre.
+fn destination_in_model(network: &Network, dst: &IpAddr) -> bool {
+    network.devices.values().any(|d| {
+        d.interfaces
+            .values()
+            .any(|i| i.state == AdminState::Up && i.addrs.iter().any(|a| a.contains(dst)))
+    })
 }
 
 /// Traverse UN équipement, en remplissant `hop` et en réécrivant `pkt`
@@ -188,7 +227,7 @@ fn process_device(
     pkt: &mut ConcretePacket,
     hop: &mut Hop,
     diagnostics: &mut Vec<Diagnostic>,
-) -> Result<DeviceOutcome, EvalError> {
+) -> Result<DeviceStep, EvalError> {
     let in_iface = device
         .interfaces
         .get(in_iface_id)
@@ -228,7 +267,7 @@ fn process_device(
         hop.decisions.extend(ev.decisions);
         diagnostics.extend(ev.diagnostics);
         match ev.result {
-            FilterResult::Deny => return Ok(DeviceOutcome::Denied),
+            FilterResult::Deny => return Ok(DeviceStep::Denied),
             FilterResult::Accept { nat: Some(grant) } => {
                 // DNAT : réécriture de la destination AVANT le routage.
                 if let Some(dnat) = &grant.action.dnat {
@@ -258,10 +297,12 @@ fn process_device(
         .values()
         .any(|i| i.state == AdminState::Up && i.addrs.iter().any(|a| a.addr() == pkt.dst))
     {
-        return Ok(DeviceOutcome::LocalDelivery);
+        return Ok(DeviceStep::LocalDelivery);
     }
 
     // --- Routage ----------------------------------------------------------
+    // Les filtres de sortie ne sont PAS évalués ici : ils dépendent de
+    // l'interface candidate, et l'ECMP en rend plusieurs (une par branche).
     match lookup_route(device, &in_iface.vrf, &pkt.dst)? {
         RouteDecision::NoRoute => {
             hop.decisions.push(Decision {
@@ -271,7 +312,7 @@ fn process_device(
                 outcome: Outcome::NoRoute,
                 shadowed_by: Vec::new(),
             });
-            Ok(DeviceOutcome::NoRoute)
+            Ok(DeviceStep::NoRoute)
         }
         RouteDecision::Blackhole { source, .. } => {
             // Verdict global `NoRoute` ; la décision `RouteDrop` pointe la
@@ -283,112 +324,504 @@ fn process_device(
                 outcome: Outcome::RouteDrop,
                 shadowed_by: Vec::new(),
             });
-            Ok(DeviceOutcome::NoRoute)
+            Ok(DeviceStep::NoRoute)
         }
         RouteDecision::Forward {
-            out_iface, source, ..
-        } => {
-            hop.decisions.push(Decision {
-                stage: Stage::Route,
-                rule: None,
+            out_iface,
+            gateway,
+            source,
+            ..
+        } => Ok(DeviceStep::Routed {
+            candidates: vec![EcmpRoute {
+                out_iface,
+                gateway,
                 source,
-                outcome: Outcome::RouteFound,
-                shadowed_by: Vec::new(),
-            });
-            hop.out_iface = Some(out_iface.clone());
-
-            // --- Filtres de sortie (zones d'entrée ET de sortie connues) --
-            let egress_point = FilterPoint::Egress {
-                in_zone,
-                out_zone: zone_of(device, &out_iface),
-            };
-            for pid in &device.pipeline.egress {
-                let policy = device
-                    .policies
-                    .get(pid)
-                    .ok_or_else(|| EvalError::PolicyMissing {
-                        policy: pid.clone(),
-                    })?;
-                let ev = evaluate_policy(device, policy, pkt, &egress_point, Stage::EgressFilter)?;
-                hop.decisions.extend(ev.decisions);
-                diagnostics.extend(ev.diagnostics);
-                match ev.result {
-                    FilterResult::Deny => return Ok(DeviceOutcome::Denied),
-                    FilterResult::Accept { nat: Some(grant) } => {
-                        if grant.action.dnat.is_some() {
-                            // Trop tard pour réécrire la destination.
-                            return Err(EvalError::DnatAfterRouting {
-                                rule: grant.rule,
-                                source: grant.source,
-                            });
-                        }
-                        if grant.action.snat.is_some() {
-                            if pending_snat.is_some() {
-                                diagnostics.push(info(format!(
-                                    "SNAT d'entrée remplacé par le SNAT de sortie sur « {} »",
-                                    device.id
-                                )));
-                            }
-                            pending_snat = Some(grant);
-                        }
-                    }
-                    FilterResult::Accept { nat: None } => {}
-                }
-            }
-
-            // --- SNAT : réécriture de la source APRÈS le filtre de sortie -
-            if let Some(grant) = pending_snat {
-                if let Some(pool) = grant.action.snat {
-                    if pool.prefix_len() < pool.max_prefix_len() {
-                        diagnostics.push(info(format!(
-                            "SNAT vers le pool {pool} : adresse représentative {} retenue",
-                            pool.addr()
-                        )));
-                    }
-                    pkt.src = pool.addr();
-                    hop.decisions.push(Decision {
-                        stage: Stage::Nat,
-                        rule: grant.rule,
-                        source: grant.source,
-                        outcome: Outcome::Rewritten,
-                        shadowed_by: Vec::new(),
-                    });
-                }
-            }
-
-            Ok(DeviceOutcome::Forwarded { out_iface })
-        }
+            }],
+            pending_snat,
+            in_zone,
+        }),
+        RouteDecision::Ecmp { routes, .. } => Ok(DeviceStep::Routed {
+            candidates: routes,
+            pending_snat,
+            in_zone,
+        }),
     }
 }
 
-/// La boucle de propagation (§5.1), à partir d'un point d'entrée connu.
-fn run(
-    network: &Network,
-    mut cur_device: DeviceId,
-    mut cur_iface: IfaceId,
-    packet: &ConcretePacket,
-    mut diagnostics: Vec<Diagnostic>,
-) -> Trace {
-    let mut pkt = *packet;
-    let mut hops: Vec<Hop> = Vec::new();
-    let mut visited: BTreeSet<DeviceId> = BTreeSet::new();
+/// Filtres de sortie puis SNAT pour UNE interface de sortie candidate
+/// (zones d'entrée ET de sortie connues). Rend `true` si un filtre refuse ;
+/// mute `pkt` (SNAT) et remplit `hop`.
+fn process_egress(
+    device: &Device,
+    in_zone: &Option<ZoneId>,
+    out_iface: &IfaceId,
+    mut pending_snat: Option<NatGrant>,
+    pkt: &mut ConcretePacket,
+    hop: &mut Hop,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> Result<bool, EvalError> {
+    let egress_point = FilterPoint::Egress {
+        in_zone: in_zone.clone(),
+        out_zone: zone_of(device, out_iface),
+    };
+    for pid in &device.pipeline.egress {
+        let policy = device
+            .policies
+            .get(pid)
+            .ok_or_else(|| EvalError::PolicyMissing {
+                policy: pid.clone(),
+            })?;
+        let ev = evaluate_policy(device, policy, pkt, &egress_point, Stage::EgressFilter)?;
+        hop.decisions.extend(ev.decisions);
+        diagnostics.extend(ev.diagnostics);
+        match ev.result {
+            FilterResult::Deny => return Ok(true),
+            FilterResult::Accept { nat: Some(grant) } => {
+                if grant.action.dnat.is_some() {
+                    // Trop tard pour réécrire la destination.
+                    return Err(EvalError::DnatAfterRouting {
+                        rule: grant.rule,
+                        source: grant.source,
+                    });
+                }
+                if grant.action.snat.is_some() {
+                    if pending_snat.is_some() {
+                        diagnostics.push(info(format!(
+                            "SNAT d'entrée remplacé par le SNAT de sortie sur « {} »",
+                            device.id
+                        )));
+                    }
+                    pending_snat = Some(grant);
+                }
+            }
+            FilterResult::Accept { nat: None } => {}
+        }
+    }
 
-    loop {
-        // Détection de boucle : équipement déjà traversé.
-        if !visited.insert(cur_device.clone()) {
-            diagnostics.push(Diagnostic::error(
-                format!("boucle de routage : « {cur_device} » déjà traversé"),
-                None,
-            ));
-            return Trace {
-                verdict: Verdict::Loop,
+    // --- SNAT : réécriture de la source APRÈS le filtre de sortie ---------
+    if let Some(grant) = pending_snat {
+        if let Some(pool) = grant.action.snat {
+            if pool.prefix_len() < pool.max_prefix_len() {
+                diagnostics.push(info(format!(
+                    "SNAT vers le pool {pool} : adresse représentative {} retenue",
+                    pool.addr()
+                )));
+            }
+            pkt.src = pool.addr();
+            hop.decisions.push(Decision {
+                stage: Stage::Nat,
+                rule: grant.rule,
+                source: grant.source,
+                outcome: Outcome::Rewritten,
+                shadowed_by: Vec::new(),
+            });
+        }
+    }
+    Ok(false)
+}
+
+/// L'état d'une branche prête à poursuivre sur l'équipement suivant.
+struct NextHopState {
+    device: DeviceId,
+    iface: IfaceId,
+    pkt: ConcretePacket,
+    visited: BTreeSet<DeviceId>,
+    hops: Vec<Hop>,
+    diagnostics: Vec<Diagnostic>,
+}
+
+/// Le sort d'une branche après filtres de sortie et franchissement.
+enum BranchStep {
+    /// La branche est terminée : voici sa trace complète.
+    Done(Trace),
+    /// La branche continue sur l'équipement suivant.
+    Next(Box<NextHopState>),
+}
+
+/// Le marcheur de la propagation concrète (§5.1). Il porte le budget cumulé
+/// de branches ECMP ([`MAX_ECMP_TOTAL_BRANCHES`]) : la récursion n'a lieu
+/// QUE sur un embranchement ECMP, le chemin linéaire reste une boucle — la
+/// profondeur de pile est donc bornée par ce budget.
+struct Walker<'a> {
+    network: &'a Network,
+    ecmp_budget: usize,
+}
+
+impl Walker<'_> {
+    /// La boucle de propagation (§5.1), à partir d'un point d'entrée connu.
+    fn walk(
+        &mut self,
+        mut cur_device: DeviceId,
+        mut cur_iface: IfaceId,
+        mut pkt: ConcretePacket,
+        mut visited: BTreeSet<DeviceId>,
+        mut hops: Vec<Hop>,
+        mut diagnostics: Vec<Diagnostic>,
+    ) -> Trace {
+        loop {
+            // Détection de boucle : équipement déjà traversé.
+            if !visited.insert(cur_device.clone()) {
+                diagnostics.push(Diagnostic::error(
+                    format!("boucle de routage : « {cur_device} » déjà traversé"),
+                    None,
+                ));
+                return Trace {
+                    verdict: Verdict::Loop,
+                    hops,
+                    diagnostics,
+                };
+            }
+            let network = self.network;
+            let Some(device) = network.devices.get(&cur_device) else {
+                diagnostics.push(Diagnostic::error(
+                    format!("équipement « {cur_device} » absent du modèle"),
+                    None,
+                ));
+                return Trace {
+                    verdict: Verdict::Unknown,
+                    hops,
+                    diagnostics,
+                };
+            };
+
+            let mut hop = Hop {
+                device: cur_device.clone(),
+                in_iface: cur_iface.clone(),
+                out_iface: None,
+                header_in: pkt,
+                header_out: pkt,
+                decisions: Vec::new(),
+            };
+            let step = process_device(device, &cur_iface, &mut pkt, &mut hop, &mut diagnostics);
+            hop.header_out = pkt;
+
+            match step {
+                Err(e) => {
+                    diagnostics.push(e.to_diagnostic());
+                    hops.push(hop);
+                    return Trace {
+                        verdict: Verdict::Unknown,
+                        hops,
+                        diagnostics,
+                    };
+                }
+                Ok(DeviceStep::Denied) => {
+                    hops.push(hop);
+                    return Trace {
+                        verdict: Verdict::Denied,
+                        hops,
+                        diagnostics,
+                    };
+                }
+                Ok(DeviceStep::LocalDelivery) => {
+                    hops.push(hop);
+                    return Trace {
+                        verdict: Verdict::Allowed,
+                        hops,
+                        diagnostics,
+                    };
+                }
+                Ok(DeviceStep::NoRoute) => {
+                    hops.push(hop);
+                    return Trace {
+                        verdict: Verdict::NoRoute,
+                        hops,
+                        diagnostics,
+                    };
+                }
+                Ok(DeviceStep::Routed {
+                    mut candidates,
+                    pending_snat,
+                    in_zone,
+                }) => {
+                    if candidates.len() == 1 {
+                        let cand = candidates.remove(0);
+                        match self.finish_branch(
+                            device,
+                            in_zone,
+                            cand,
+                            pending_snat,
+                            pkt,
+                            hop,
+                            visited,
+                            hops,
+                            diagnostics,
+                        ) {
+                            BranchStep::Done(trace) => return trace,
+                            BranchStep::Next(next) => {
+                                let n = *next;
+                                cur_device = n.device;
+                                cur_iface = n.iface;
+                                pkt = n.pkt;
+                                visited = n.visited;
+                                hops = n.hops;
+                                diagnostics = n.diagnostics;
+                            }
+                        }
+                    } else {
+                        return self.walk_ecmp(
+                            device,
+                            in_zone,
+                            candidates,
+                            pending_snat,
+                            pkt,
+                            hop,
+                            visited,
+                            hops,
+                            diagnostics,
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// Termine la traversée d'un équipement pour UNE route candidate :
+    /// filtres de sortie, SNAT, puis livraison connectée, lien physique ou
+    /// SORTIE DE PÉRIMÈTRE (critère documenté en tête de module).
+    #[allow(clippy::too_many_arguments)]
+    fn finish_branch(
+        &mut self,
+        device: &Device,
+        in_zone: Option<ZoneId>,
+        cand: EcmpRoute,
+        pending_snat: Option<NatGrant>,
+        mut pkt: ConcretePacket,
+        mut hop: Hop,
+        visited: BTreeSet<DeviceId>,
+        mut hops: Vec<Hop>,
+        mut diagnostics: Vec<Diagnostic>,
+    ) -> BranchStep {
+        let network = self.network;
+        // La décision de routage de la branche (l'origine de la route).
+        hop.decisions.push(Decision {
+            stage: Stage::Route,
+            rule: None,
+            source: cand.source.clone(),
+            outcome: Outcome::RouteFound,
+            shadowed_by: Vec::new(),
+        });
+        hop.out_iface = Some(cand.out_iface.clone());
+
+        let denied = match process_egress(
+            device,
+            &in_zone,
+            &cand.out_iface,
+            pending_snat,
+            &mut pkt,
+            &mut hop,
+            &mut diagnostics,
+        ) {
+            Ok(denied) => denied,
+            Err(e) => {
+                diagnostics.push(e.to_diagnostic());
+                hop.header_out = pkt;
+                hops.push(hop);
+                return BranchStep::Done(Trace {
+                    verdict: Verdict::Unknown,
+                    hops,
+                    diagnostics,
+                });
+            }
+        };
+        hop.header_out = pkt;
+        hops.push(hop);
+        if denied {
+            return BranchStep::Done(Trace {
+                verdict: Verdict::Denied,
                 hops,
                 diagnostics,
+            });
+        }
+
+        // Destination sur un réseau directement connecté à la sortie ?
+        let delivered = device
+            .interfaces
+            .get(&cand.out_iface)
+            .map(|o| o.addrs.iter().any(|a| a.contains(&pkt.dst)))
+            .unwrap_or(false);
+        if delivered {
+            return match owner_of_address(network, &pkt.dst) {
+                // L'adresse est portée par un équipement modélisé :
+                // on y entre (ses filtres s'appliquent).
+                Ok(Some((d, i))) => BranchStep::Next(Box::new(NextHopState {
+                    device: d,
+                    iface: i,
+                    pkt,
+                    visited,
+                    hops,
+                    diagnostics,
+                })),
+                // Hôte non modélisé du réseau connecté : atteint.
+                Ok(None) => BranchStep::Done(Trace {
+                    verdict: Verdict::Allowed,
+                    hops,
+                    diagnostics,
+                }),
+                Err(d) => {
+                    diagnostics.push(d);
+                    BranchStep::Done(Trace {
+                        verdict: Verdict::Unknown,
+                        hops,
+                        diagnostics,
+                    })
+                }
             };
         }
-        let Some(device) = network.devices.get(&cur_device) else {
+
+        // Lien(s) physique(s) depuis l'interface de sortie.
+        let peers = links_from(network, &device.id, &cand.out_iface);
+        match peers.len() {
+            0 => {
+                if destination_in_model(network, &pkt.dst) {
+                    // Vrai trou de topologie INTERNE : la destination
+                    // appartient au périmètre mais est injoignable — jamais
+                    // transformé en « autorisé » (§6.3).
+                    diagnostics.push(Diagnostic::error(
+                        format!(
+                            "topologie incomplète : aucun lien depuis {}/{} et la \
+                             destination {} appartient au périmètre modélisé",
+                            device.id, cand.out_iface, pkt.dst
+                        ),
+                        None,
+                    ));
+                    BranchStep::Done(Trace {
+                        verdict: Verdict::Unknown,
+                        hops,
+                        diagnostics,
+                    })
+                } else {
+                    // SORTIE DE PÉRIMÈTRE : la destination n'appartient à
+                    // aucun équipement ni réseau du modèle ET l'interface de
+                    // sortie n'a aucun lien. L'équipement a tranché (filtres
+                    // passés, route choisie) : verdict ferme `Allowed`, avec
+                    // la décision explicite `ExitsModel`.
+                    if let Some(last) = hops.last_mut() {
+                        last.decisions.push(Decision {
+                            stage: Stage::Route,
+                            rule: None,
+                            source: cand.source,
+                            outcome: Outcome::ExitsModel {
+                                iface: cand.out_iface,
+                                gateway: cand.gateway,
+                            },
+                            shadowed_by: Vec::new(),
+                        });
+                    }
+                    BranchStep::Done(Trace {
+                        verdict: Verdict::Allowed,
+                        hops,
+                        diagnostics,
+                    })
+                }
+            }
+            1 => {
+                let peer = peers[0];
+                let peer_ok = network
+                    .devices
+                    .get(&peer.device)
+                    .and_then(|d| d.interfaces.get(&peer.iface))
+                    .map(|i| i.state == AdminState::Up);
+                match peer_ok {
+                    Some(true) => BranchStep::Next(Box::new(NextHopState {
+                        device: peer.device.clone(),
+                        iface: peer.iface.clone(),
+                        pkt,
+                        visited,
+                        hops,
+                        diagnostics,
+                    })),
+                    Some(false) => {
+                        diagnostics.push(Diagnostic::error(
+                            format!(
+                                "l'extrémité distante {}/{} est désactivée",
+                                peer.device, peer.iface
+                            ),
+                            None,
+                        ));
+                        BranchStep::Done(Trace {
+                            verdict: Verdict::Unknown,
+                            hops,
+                            diagnostics,
+                        })
+                    }
+                    None => {
+                        diagnostics.push(Diagnostic::error(
+                            format!(
+                                "l'extrémité distante {}/{} est absente du modèle",
+                                peer.device, peer.iface
+                            ),
+                            None,
+                        ));
+                        BranchStep::Done(Trace {
+                            verdict: Verdict::Unknown,
+                            hops,
+                            diagnostics,
+                        })
+                    }
+                }
+            }
+            _ => {
+                diagnostics.push(Diagnostic::error(
+                    format!(
+                        "topologie ambiguë : plusieurs liens depuis {}/{}",
+                        device.id, cand.out_iface
+                    ),
+                    None,
+                ));
+                BranchStep::Done(Trace {
+                    verdict: Verdict::Unknown,
+                    hops,
+                    diagnostics,
+                })
+            }
+        }
+    }
+
+    /// Évalue CHAQUE route candidate d'un ECMP comme une branche complète.
+    /// Toutes les branches mènent au même verdict → ce verdict est ferme
+    /// (la trace détaillée suit la PREMIÈRE branche, choix documenté) ;
+    /// verdicts divergents → `Unknown` avec le verdict de chaque branche en
+    /// diagnostic. Budget cumulé : [`MAX_ECMP_TOTAL_BRANCHES`].
+    #[allow(clippy::too_many_arguments)]
+    fn walk_ecmp(
+        &mut self,
+        device: &Device,
+        in_zone: Option<ZoneId>,
+        candidates: Vec<EcmpRoute>,
+        pending_snat: Option<NatGrant>,
+        pkt: ConcretePacket,
+        mut hop: Hop,
+        visited: BTreeSet<DeviceId>,
+        mut hops: Vec<Hop>,
+        mut diagnostics: Vec<Diagnostic>,
+    ) -> Trace {
+        let ifaces: Vec<IfaceId> = candidates.iter().map(|c| c.out_iface.clone()).collect();
+        let list = ifaces
+            .iter()
+            .map(|i| i.to_string())
+            .collect::<Vec<_>>()
+            .join(", ");
+        // Position d'insertion de la décision ECMP dans le saut décideur :
+        // juste avant la décision de routage de la branche retenue.
+        let ingress_len = hop.decisions.len();
+        let base_hops_len = hops.len();
+        let base_diags_len = diagnostics.len();
+
+        if candidates.len() > self.ecmp_budget {
+            hop.decisions.push(Decision {
+                stage: Stage::Route,
+                rule: None,
+                source: None,
+                outcome: Outcome::EcmpDiverged { ifaces },
+                shadowed_by: Vec::new(),
+            });
+            hops.push(hop);
             diagnostics.push(Diagnostic::error(
-                format!("équipement « {cur_device} » absent du modèle"),
+                format!(
+                    "borne de bifurcation ECMP atteinte \
+                     ({MAX_ECMP_TOTAL_BRANCHES} branches cumulées) : verdict indéterminé"
+                ),
                 None,
             ));
             return Trace {
@@ -396,145 +829,157 @@ fn run(
                 hops,
                 diagnostics,
             };
-        };
+        }
+        self.ecmp_budget -= candidates.len();
 
-        let mut hop = Hop {
-            device: cur_device.clone(),
-            in_iface: cur_iface.clone(),
-            out_iface: None,
-            header_in: pkt,
-            header_out: pkt,
-            decisions: Vec::new(),
-        };
-        let outcome = process_device(device, &cur_iface, &mut pkt, &mut hop, &mut diagnostics);
-        hop.header_out = pkt;
-
-        match outcome {
-            Err(e) => {
-                diagnostics.push(e.to_diagnostic());
-                hops.push(hop);
-                return Trace {
-                    verdict: Verdict::Unknown,
-                    hops,
-                    diagnostics,
-                };
-            }
-            Ok(DeviceOutcome::Denied) => {
-                hops.push(hop);
-                return Trace {
-                    verdict: Verdict::Denied,
-                    hops,
-                    diagnostics,
-                };
-            }
-            Ok(DeviceOutcome::LocalDelivery) => {
-                hops.push(hop);
-                return Trace {
-                    verdict: Verdict::Allowed,
-                    hops,
-                    diagnostics,
-                };
-            }
-            Ok(DeviceOutcome::NoRoute) => {
-                hops.push(hop);
-                return Trace {
-                    verdict: Verdict::NoRoute,
-                    hops,
-                    diagnostics,
-                };
-            }
-            Ok(DeviceOutcome::Forwarded { out_iface }) => {
-                hops.push(hop);
-
-                // Destination sur un réseau directement connecté à la sortie ?
-                let delivered = device
-                    .interfaces
-                    .get(&out_iface)
-                    .map(|o| o.addrs.iter().any(|a| a.contains(&pkt.dst)))
-                    .unwrap_or(false);
-                if delivered {
-                    match owner_of_address(network, &pkt.dst) {
-                        // L'adresse est portée par un équipement modélisé :
-                        // on y entre (ses filtres s'appliquent).
-                        Ok(Some((d, i))) => {
-                            cur_device = d;
-                            cur_iface = i;
-                            continue;
-                        }
-                        // Hôte non modélisé du réseau connecté : atteint.
-                        Ok(None) => {
-                            return Trace {
-                                verdict: Verdict::Allowed,
-                                hops,
-                                diagnostics,
-                            }
-                        }
-                        Err(d) => {
-                            diagnostics.push(d);
-                            return Trace {
-                                verdict: Verdict::Unknown,
-                                hops,
-                                diagnostics,
-                            };
-                        }
-                    }
+        let n = candidates.len();
+        let mut branches: Vec<(IfaceId, Trace)> = Vec::with_capacity(n);
+        for cand in candidates {
+            let iface = cand.out_iface.clone();
+            let step = self.finish_branch(
+                device,
+                in_zone.clone(),
+                cand,
+                pending_snat.clone(),
+                pkt,
+                hop.clone(),
+                visited.clone(),
+                hops.clone(),
+                diagnostics.clone(),
+            );
+            let trace = match step {
+                BranchStep::Done(t) => t,
+                BranchStep::Next(next) => {
+                    let s = *next;
+                    self.walk(s.device, s.iface, s.pkt, s.visited, s.hops, s.diagnostics)
                 }
+            };
+            branches.push((iface, trace));
+        }
 
-                // Sinon : traverser le lien physique vers l'équipement suivant.
-                match find_link(network, &cur_device, &out_iface) {
-                    Ok(peer) => {
-                        let peer_ok = network
-                            .devices
-                            .get(&peer.device)
-                            .and_then(|d| d.interfaces.get(&peer.iface))
-                            .map(|i| i.state == AdminState::Up);
-                        match peer_ok {
-                            Some(true) => {
-                                cur_device = peer.device.clone();
-                                cur_iface = peer.iface.clone();
-                            }
-                            Some(false) => {
-                                diagnostics.push(Diagnostic::error(
-                                    format!(
-                                        "l'extrémité distante {}/{} est désactivée",
-                                        peer.device, peer.iface
-                                    ),
-                                    None,
-                                ));
-                                return Trace {
-                                    verdict: Verdict::Unknown,
-                                    hops,
-                                    diagnostics,
-                                };
-                            }
-                            None => {
-                                diagnostics.push(Diagnostic::error(
-                                    format!(
-                                        "l'extrémité distante {}/{} est absente du modèle",
-                                        peer.device, peer.iface
-                                    ),
-                                    None,
-                                ));
-                                return Trace {
-                                    verdict: Verdict::Unknown,
-                                    hops,
-                                    diagnostics,
-                                };
-                            }
-                        }
-                    }
-                    Err(d) => {
-                        diagnostics.push(d);
-                        return Trace {
-                            verdict: Verdict::Unknown,
-                            hops,
-                            diagnostics,
-                        };
-                    }
-                }
+        let agreed = branches
+            .iter()
+            .all(|(_, t)| t.verdict == branches[0].1.verdict);
+        if agreed {
+            // Toutes les branches mènent au même verdict : il est FERME.
+            let (first_iface, mut trace) = branches.remove(0);
+            if let Some(h) = trace.hops.get_mut(base_hops_len) {
+                let pos = ingress_len.min(h.decisions.len());
+                h.decisions.insert(
+                    pos,
+                    Decision {
+                        stage: Stage::Route,
+                        rule: None,
+                        source: None,
+                        outcome: Outcome::EcmpAgreed {
+                            ifaces: ifaces.clone(),
+                        },
+                        shadowed_by: Vec::new(),
+                    },
+                );
+            }
+            trace.diagnostics.push(info(format!(
+                "ECMP : {n} routes candidates ({list}), verdict identique sur toutes \
+                 les branches ; la trace détaillée suit la première branche \
+                 ({first_iface})"
+            )));
+            trace
+        } else {
+            // Verdicts divergents : indéterminé, avec le diagnostic
+            // actionnable par branche (« wan1 : autorisé ; wan2 : refusé
+            // par la règle X »).
+            let details = branches
+                .iter()
+                .map(|(i, t)| format!("{i} : {}", branch_summary(t)))
+                .collect::<Vec<_>>()
+                .join(" ; ");
+            hop.decisions.push(Decision {
+                stage: Stage::Route,
+                rule: None,
+                source: None,
+                outcome: Outcome::EcmpDiverged { ifaces },
+                shadowed_by: Vec::new(),
+            });
+            hops.push(hop);
+            diagnostics.push(Diagnostic::error(
+                format!(
+                    "routes multiples et divergentes (ECMP) vers {} : {details} — \
+                     verdict indéterminé (§6.3, ne jamais deviner)",
+                    pkt.dst
+                ),
+                None,
+            ));
+            // Les diagnostics propres à chaque branche restent visibles.
+            for (_, t) in &branches {
+                diagnostics.extend(t.diagnostics.iter().skip(base_diags_len).cloned());
+            }
+            Trace {
+                verdict: Verdict::Unknown,
+                hops,
+                diagnostics,
             }
         }
     }
+}
+
+/// Libellé français du verdict d'une branche ECMP, avec la règle décisive
+/// quand elle existe (« refusé par la règle 20 (fw-01.conf ligne 200) »).
+fn branch_summary(trace: &Trace) -> String {
+    match trace.verdict {
+        Verdict::Allowed => {
+            let exits = trace
+                .hops
+                .iter()
+                .flat_map(|h| &h.decisions)
+                .any(|d| matches!(d.outcome, Outcome::ExitsModel { .. }));
+            if exits {
+                "autorisé (sort du périmètre modélisé)".to_owned()
+            } else {
+                "autorisé".to_owned()
+            }
+        }
+        Verdict::Denied => {
+            let denial = trace
+                .hops
+                .iter()
+                .rev()
+                .flat_map(|h| h.decisions.iter().rev())
+                .find(|d| matches!(d.outcome, Outcome::Denied | Outcome::DefaultAction));
+            match denial {
+                Some(d) => match (&d.rule, &d.source) {
+                    (Some(r), Some(s)) => format!("refusé par la règle {r} ({s})"),
+                    (Some(r), None) => format!("refusé par la règle {r}"),
+                    _ => "refusé (action par défaut de la politique)".to_owned(),
+                },
+                None => "refusé".to_owned(),
+            }
+        }
+        Verdict::NoRoute => "pas de route".to_owned(),
+        Verdict::Loop => "boucle de routage".to_owned(),
+        Verdict::Unknown => "indéterminé (voir les diagnostics)".to_owned(),
+    }
+}
+
+/// Point d'entrée interne : construit le marcheur avec son budget ECMP.
+fn run(
+    network: &Network,
+    cur_device: DeviceId,
+    cur_iface: IfaceId,
+    packet: &ConcretePacket,
+    diagnostics: Vec<Diagnostic>,
+) -> Trace {
+    let mut walker = Walker {
+        network,
+        ecmp_budget: MAX_ECMP_TOTAL_BRANCHES,
+    };
+    walker.walk(
+        cur_device,
+        cur_iface,
+        *packet,
+        BTreeSet::new(),
+        Vec::new(),
+        diagnostics,
+    )
 }
 
 /// Trace un paquet concret à travers le réseau, en localisant d'abord la
@@ -1074,5 +1519,274 @@ mod tests {
         assert_eq!(trace.hops.len(), 2);
         assert_eq!(trace.hops[1].device, DeviceId::new("fw2"));
         assert_eq!(trace.hops[1].out_iface, None); // livraison locale
+    }
+
+    // -----------------------------------------------------------------------
+    // Sortie de périmètre modélisé et ECMP par branches.
+    //
+    // Le réseau à UN équipement (cas réel : un FortiGate de collectivité) :
+    //
+    //   [hôtes 10.0.10.0/24] — lan[fw]wan1 → passerelle 198.51.100.1 (hors
+    //   modèle, aucun lien)
+    // -----------------------------------------------------------------------
+
+    /// Le pare-feu seul : lan + wan1, route par défaut vers une passerelle
+    /// hors modèle, aucun lien.
+    fn single_device_network() -> Network {
+        let mut fw = Device::new(DeviceId::new("fw"), Vendor::Fortigate);
+        for i in [
+            iface("lan", "10.0.10.1/24", Some("lan")),
+            iface("wan1", "198.51.100.2/30", Some("wan")),
+        ] {
+            fw.interfaces.insert(i.id.clone(), i);
+        }
+        fw.vrfs.insert(
+            VrfId::default_vrf(),
+            Vrf {
+                routes: vec![Route {
+                    prefix: net("0.0.0.0/0"),
+                    next_hop: calque_model::NextHop::Ip(ip("198.51.100.1")),
+                    metric: 10,
+                    origin: RouteOrigin::Static,
+                    source: Some(span(900)),
+                }],
+            },
+        );
+        let mut network = Network::default();
+        network.devices.insert(fw.id.clone(), fw);
+        network
+    }
+
+    /// Accroche une politique de SORTIE sur l'équipement « fw ».
+    fn with_fw_egress(mut network: Network, rules: Vec<Rule>, default_action: Action) -> Network {
+        let fw = network.devices.get_mut(&DeviceId::new("fw")).expect("fw");
+        let pid = PolicyId::new("fw-out");
+        fw.policies.insert(
+            pid.clone(),
+            Policy {
+                id: pid.clone(),
+                rules,
+                default_action,
+            },
+        );
+        fw.pipeline.egress.push(pid);
+        network
+    }
+
+    /// La décision ExitsModel d'une trace, si elle existe.
+    fn exits_decision(trace: &Trace) -> Option<&Decision> {
+        find_decision(trace, |d| matches!(d.outcome, Outcome::ExitsModel { .. }))
+    }
+
+    /// (a) Un flux routé vers l'extérieur du modèle : l'équipement A tranché
+    /// (filtre passé, route choisie), le verdict est FERME — `Allowed` avec
+    /// la décision explicite « sort du périmètre modélisé via wan1 ».
+    #[test]
+    fn sortie_de_perimetre_autorisee_via_wan() {
+        let network = with_fw_egress(
+            single_device_network(),
+            vec![rule(
+                "10",
+                vec![AddrExpr::Net(net("10.0.10.0/24"))],
+                vec![],
+                vec![tcp_svc(443)],
+                Some("lan"),
+                Some("wan"),
+                Action::Accept,
+                100,
+            )],
+            Action::Deny,
+        );
+        let trace = trace_packet(&network, &tcp("10.0.10.5", "203.0.113.50", 443));
+        assert_eq!(trace.verdict, Verdict::Allowed);
+        assert_eq!(trace.hops.len(), 1);
+        assert_eq!(trace.hops[0].out_iface, Some(IfaceId::new("wan1")));
+        let d = exits_decision(&trace).expect("décision ExitsModel");
+        assert_eq!(
+            d.outcome,
+            Outcome::ExitsModel {
+                iface: IfaceId::new("wan1"),
+                gateway: Some(ip("198.51.100.1")),
+            }
+        );
+        // Le libellé rendu dit clairement la sortie de périmètre.
+        assert_eq!(
+            d.outcome.to_string(),
+            "sort du périmètre modélisé via wan1 (passerelle 198.51.100.1)"
+        );
+        // La règle décisive reste tracée.
+        let accept = find_decision(&trace, |d| d.outcome == Outcome::Accepted)
+            .expect("décision d'acceptation");
+        assert_eq!(accept.rule, Some(RuleId::new("10")));
+    }
+
+    /// (a) Le même flux refusé par le filtre de sortie : `Denied` normal,
+    /// sans décision de sortie de périmètre.
+    #[test]
+    fn sortie_de_perimetre_refusee_par_le_filtre() {
+        let network = with_fw_egress(single_device_network(), vec![], Action::Deny);
+        let trace = trace_packet(&network, &tcp("10.0.10.5", "203.0.113.50", 443));
+        assert_eq!(trace.verdict, Verdict::Denied);
+        assert!(exits_decision(&trace).is_none());
+    }
+
+    /// (b) Interface tunnel sans adresse ni lien (le cas IPsec) + route par
+    /// objet vers le réseau distant : `Allowed` avec ExitsModel via le
+    /// tunnel, sans passerelle.
+    #[test]
+    fn sortie_de_perimetre_via_tunnel_sans_adresse() {
+        let mut network = single_device_network();
+        let fw = network.devices.get_mut(&DeviceId::new("fw")).expect("fw");
+        // Tunnel : aucune adresse, aucune zone, aucun lien.
+        let tunnel = Interface::new(IfaceId::new("vpn-siteb"));
+        fw.interfaces.insert(tunnel.id.clone(), tunnel);
+        fw.vrfs
+            .get_mut(&VrfId::default_vrf())
+            .expect("vrf")
+            .routes
+            .push(Route {
+                prefix: net("192.168.100.0/24"),
+                next_hop: calque_model::NextHop::Interface(IfaceId::new("vpn-siteb")),
+                metric: 10,
+                origin: RouteOrigin::Static,
+                source: Some(span(910)),
+            });
+        let network = with_fw_egress(network, vec![], Action::Accept);
+
+        let trace = trace_packet(&network, &tcp("10.0.10.5", "192.168.100.20", 445));
+        assert_eq!(trace.verdict, Verdict::Allowed);
+        let d = exits_decision(&trace).expect("décision ExitsModel");
+        assert_eq!(
+            d.outcome,
+            Outcome::ExitsModel {
+                iface: IfaceId::new("vpn-siteb"),
+                gateway: None,
+            }
+        );
+        assert_eq!(d.source, Some(span(910))); // la route responsable
+    }
+
+    /// (c) Non-régression : un vrai trou de topologie INTERNE (destination
+    /// portée par un équipement du modèle, mais aucun lien pour l'atteindre)
+    /// reste `Unknown` — jamais transformé en « autorisé ».
+    #[test]
+    fn trou_de_topologie_interne_reste_unknown() {
+        let mut network = with_fw1_egress(vec![], Action::Accept);
+        network.links.clear(); // fw1 et fw2 ne sont plus reliés
+
+        // 10.0.20.1 est PORTÉE par fw2/dmz : trou interne.
+        let trace = trace_packet(&network, &tcp("10.0.10.5", "10.0.20.1", 445));
+        assert_eq!(trace.verdict, Verdict::Unknown);
+        assert!(trace
+            .diagnostics
+            .iter()
+            .any(|d| d.message.contains("topologie incomplète")));
+        assert!(exits_decision(&trace).is_none());
+
+        // 10.0.20.7 n'est portée par personne mais appartient au réseau
+        // modélisé 10.0.20.0/24 (fw2/dmz) : toujours un trou interne.
+        let trace = trace_packet(&network, &tcp("10.0.10.5", "10.0.20.7", 445));
+        assert_eq!(trace.verdict, Verdict::Unknown);
+        assert!(exits_decision(&trace).is_none());
+    }
+
+    /// Le pare-feu seul en ECMP : deux routes par défaut divergentes
+    /// (wan1 et wan2 — le cas réel : route par défaut SD-WAN à 2 membres).
+    fn ecmp_network() -> Network {
+        let mut network = single_device_network();
+        let fw = network.devices.get_mut(&DeviceId::new("fw")).expect("fw");
+        let wan2 = iface("wan2", "203.0.113.2/30", Some("wan2z"));
+        fw.interfaces.insert(wan2.id.clone(), wan2);
+        fw.vrfs
+            .get_mut(&VrfId::default_vrf())
+            .expect("vrf")
+            .routes
+            .push(Route {
+                prefix: net("0.0.0.0/0"),
+                next_hop: calque_model::NextHop::Ip(ip("203.0.113.1")),
+                metric: 10, // même préfixe, même métrique : ECMP
+                origin: RouteOrigin::Static,
+                source: Some(span(901)),
+            });
+        network
+    }
+
+    /// (d) ECMP dont TOUTES les branches mènent au même verdict : le verdict
+    /// est ferme, la décision `EcmpAgreed` liste les interfaces, et la trace
+    /// détaillée suit la première branche (documenté).
+    #[test]
+    fn ecmp_verdict_identique_est_ferme() {
+        let network = with_fw_egress(ecmp_network(), vec![], Action::Accept);
+        let trace = trace_packet(&network, &tcp("10.0.10.5", "8.8.8.8", 443));
+        assert_eq!(trace.verdict, Verdict::Allowed);
+        // La décision ECMP liste les deux interfaces candidates.
+        let d = find_decision(&trace, |d| matches!(d.outcome, Outcome::EcmpAgreed { .. }))
+            .expect("décision EcmpAgreed");
+        assert_eq!(
+            d.outcome,
+            Outcome::EcmpAgreed {
+                ifaces: vec![IfaceId::new("wan1"), IfaceId::new("wan2")],
+            }
+        );
+        // Le saut retenu est la première branche (wan1), documenté par un
+        // diagnostic informatif.
+        assert_eq!(trace.hops[0].out_iface, Some(IfaceId::new("wan1")));
+        assert!(trace
+            .diagnostics
+            .iter()
+            .any(|d| d.severity == Severity::Info && d.message.contains("première branche")));
+        // Les deux branches sortent du périmètre : la première est tracée.
+        assert!(exits_decision(&trace).is_some());
+    }
+
+    /// (d) ECMP aux verdicts DIVERGENTS (une branche filtrée en sortie,
+    /// l'autre non) : `Unknown`, avec chaque branche et son verdict dans les
+    /// diagnostics — l'information actionnable.
+    #[test]
+    fn ecmp_verdicts_divergents_rend_unknown_diagnostique() {
+        // Refus explicite vers la zone de wan2 ; le reste passe.
+        let network = with_fw_egress(
+            ecmp_network(),
+            vec![rule(
+                "50",
+                vec![],
+                vec![],
+                vec![],
+                None,
+                Some("wan2z"),
+                Action::Deny,
+                500,
+            )],
+            Action::Accept,
+        );
+        let trace = trace_packet(&network, &tcp("10.0.10.5", "8.8.8.8", 443));
+        assert_eq!(trace.verdict, Verdict::Unknown);
+        let d = find_decision(&trace, |d| {
+            matches!(d.outcome, Outcome::EcmpDiverged { .. })
+        })
+        .expect("décision EcmpDiverged");
+        assert_eq!(
+            d.outcome,
+            Outcome::EcmpDiverged {
+                ifaces: vec![IfaceId::new("wan1"), IfaceId::new("wan2")],
+            }
+        );
+        // Le diagnostic liste chaque branche et son verdict, règle comprise.
+        let diag = trace
+            .diagnostics
+            .iter()
+            .find(|d| d.message.contains("divergentes"))
+            .expect("diagnostic ECMP divergent");
+        assert!(
+            diag.message.contains("wan1 : autorisé"),
+            "branche wan1 : {}",
+            diag.message
+        );
+        assert!(
+            diag.message
+                .contains("wan2 : refusé par la règle 50 (fw-01.conf ligne 500)"),
+            "branche wan2 : {}",
+            diag.message
+        );
     }
 }

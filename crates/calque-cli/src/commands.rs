@@ -298,9 +298,16 @@ fn path(root: &Path, args: PathArgs) -> miette::Result<ExitCode> {
             }
         }
         DataFormat::Text => {
+            // La ligne de verdict porte la note de sortie de périmètre le
+            // cas échéant : « autorisé (sort du périmètre modélisé via
+            // wan1, passerelle …) » — jamais un « autorisé » trompeur.
             println!(
                 "{} → {}:{}/{} : {}",
-                packet.src, packet.dst, packet.dport, proto, view.verdict
+                packet.src,
+                packet.dst,
+                packet.dport,
+                proto,
+                view.verdict_line()
             );
             let devices: Vec<&str> = view.hops.iter().map(|h| h.device.as_str()).collect();
             if !devices.is_empty() {
@@ -573,7 +580,26 @@ fn test(root: &Path, args: TestArgs) -> miette::Result<ExitCode> {
     // préparation du modèle que `path` et `plan`, faite une fois pour
     // toute la suite.
     let prepared = backend::prepare_for_engine(&project.network);
-    let results = calque_policy::evaluate_flows(&prepared, &flows.flows, &project.device_fidelity);
+    // `--allow-partial` : la carte de fidélité vidée désactive le refus
+    // de verdict ferme (§6.3) — assumé et rappelé sur stderr.
+    let fidelity = if args.allow_partial {
+        let partiels = project
+            .device_fidelity
+            .iter()
+            .filter(|(_, f)| !f.is_complete())
+            .count();
+        if partiels > 0 {
+            eprintln!(
+                "Attention : --allow-partial — {partiels} équipement(s) à fidélité \
+                 PARTIELLE ; les verdicts s'appuient sur la partie modélisée \
+                 (lancez `calque model check` pour ce qui ne l'est pas)."
+            );
+        }
+        std::collections::BTreeMap::new()
+    } else {
+        project.device_fidelity.clone()
+    };
+    let results = calque_policy::evaluate_flows(&prepared, &flows.flows, &fidelity);
 
     match args.format {
         OutputFormat::Text => print!("{}", calque_report::render_flow_results_text(&results)),

@@ -145,6 +145,71 @@ pub fn with_fw1_egress(rules: Vec<Rule>, default_action: Action) -> Network {
     network
 }
 
+/// Le pare-feu SEUL (le cas réel : un FortiGate de collectivité) : lan +
+/// wan1 vers une passerelle hors modèle (198.51.100.1), aucun lien.
+pub fn single_device_network() -> Network {
+    let mut fw = Device::new(DeviceId::new("fw"), Vendor::Fortigate);
+    for i in [
+        iface("lan", "10.0.10.1/24", Some("lan")),
+        iface("wan1", "198.51.100.2/30", Some("wan")),
+    ] {
+        fw.interfaces.insert(i.id.clone(), i);
+    }
+    fw.vrfs.insert(
+        VrfId::default_vrf(),
+        Vrf {
+            routes: vec![Route {
+                prefix: net("0.0.0.0/0"),
+                next_hop: NextHop::Ip(ip("198.51.100.1")),
+                metric: 10,
+                origin: RouteOrigin::Static,
+                source: Some(span(900)),
+            }],
+        },
+    );
+    let mut network = Network::default();
+    network.devices.insert(fw.id.clone(), fw);
+    network
+}
+
+/// Accroche une politique de SORTIE sur l'équipement « fw » du réseau à un
+/// seul équipement.
+pub fn with_fw_egress(mut network: Network, rules: Vec<Rule>, default_action: Action) -> Network {
+    let fw = network.devices.get_mut(&DeviceId::new("fw")).expect("fw");
+    let pid = PolicyId::new("fw-out");
+    fw.policies.insert(
+        pid.clone(),
+        Policy {
+            id: pid.clone(),
+            rules,
+            default_action,
+        },
+    );
+    fw.pipeline.egress.push(pid);
+    network
+}
+
+/// Le pare-feu seul en ECMP : deux routes par défaut divergentes (wan1 et
+/// wan2 — le cas réel : route par défaut SD-WAN à 2 membres).
+pub fn ecmp_network() -> Network {
+    let mut network = single_device_network();
+    let fw = network.devices.get_mut(&DeviceId::new("fw")).expect("fw");
+    let wan2 = iface("wan2", "203.0.113.2/30", Some("wan2z"));
+    fw.interfaces.insert(wan2.id.clone(), wan2);
+    fw.vrfs
+        .get_mut(&VrfId::default_vrf())
+        .expect("vrf")
+        .routes
+        .push(Route {
+            prefix: net("0.0.0.0/0"),
+            next_hop: NextHop::Ip(ip("203.0.113.1")),
+            metric: 10, // même préfixe, même métrique : ECMP
+            origin: RouteOrigin::Static,
+            source: Some(span(901)),
+        });
+    network
+}
+
 /// La politique « standard » des tests : autorise le flux SMB vers le
 /// serveur de fichiers, refuse telnet explicitement, refuse le reste.
 pub fn standard_rules() -> Vec<Rule> {

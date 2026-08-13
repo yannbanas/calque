@@ -268,6 +268,124 @@ fn path_sur_modele_partiel_est_non_ferme() {
 }
 
 // ---------------------------------------------------------------------------
+// path : sortie de périmètre modélisé et ECMP par branches
+// ---------------------------------------------------------------------------
+
+/// Une configuration minimale à UN équipement : la route par défaut sort
+/// par « wan » vers une passerelle hors modèle, sans lien modélisé — le cas
+/// réel du pare-feu seul de collectivité.
+const MONO: &str = "\
+#config-version=FGT60F-7.0.5-FW-build0304-220328:opmode=0:vdom=0
+config system global
+    set hostname \"fw-solo\"
+end
+config system interface
+    edit \"lan\"
+        set vdom \"root\"
+        set ip 10.20.1.1 255.255.255.0
+        set type physical
+        set role lan
+    next
+    edit \"wan\"
+        set vdom \"root\"
+        set ip 192.0.2.2 255.255.255.252
+        set type physical
+        set role wan
+    next
+end
+config router static
+    edit 1
+        set gateway 192.0.2.1
+        set device \"wan\"
+    next
+end
+config firewall policy
+    edit 1
+        set name \"lan-vers-wan\"
+        set srcintf \"lan\"
+        set dstintf \"wan\"
+        set srcaddr \"all\"
+        set dstaddr \"all\"
+        set action accept
+        set schedule \"always\"
+        set service \"ALL\"
+    next
+end
+";
+
+/// Un flux accepté puis routé HORS du modèle : verdict ferme « autorisé »,
+/// code de sortie 0, et la ligne de verdict dit la sortie de périmètre
+/// (jamais un « autorisé » qui laisserait croire que la destination est
+/// modélisée).
+#[test]
+fn path_sortie_de_perimetre_est_ferme_et_explicite() {
+    let tmp = TempDir::new().expect("répertoire temporaire");
+    std::fs::write(tmp.path().join("mono.conf"), MONO).expect("écriture");
+    let out = calque(tmp.path(), &["import", "mono.conf"]);
+    assert_code(&out, 0);
+
+    let out = calque(
+        tmp.path(),
+        &["path", "10.20.1.5", "->", "203.0.113.99:443/tcp"],
+    );
+    assert_code(&out, 0); // Allowed garde le code 0
+    let txt = stdout(&out);
+    assert!(
+        txt.contains("autorisé (sort du périmètre modélisé via wan, passerelle 192.0.2.1)"),
+        "la ligne de verdict mentionne la sortie de périmètre : {txt}"
+    );
+
+    // La trace détaillée porte la décision de routage explicite.
+    let out = calque(
+        tmp.path(),
+        &[
+            "path",
+            "10.20.1.5",
+            "->",
+            "203.0.113.99:443/tcp",
+            "--explain",
+        ],
+    );
+    assert_code(&out, 0);
+    let txt = stdout(&out);
+    assert!(
+        txt.contains("routage : sort du périmètre modélisé via wan (passerelle 192.0.2.1)"),
+        "trace : {txt}"
+    );
+}
+
+/// ECMP (deux routes par défaut divergentes) dont les branches divergent en
+/// verdict : la politique n'autorise que la sortie « wan », pas « wan2 ».
+/// Verdict non ferme (code 3), avec le verdict de CHAQUE branche dans les
+/// diagnostics — l'information actionnable.
+#[test]
+fn path_ecmp_divergent_diagnostique_chaque_branche() {
+    let tmp = TempDir::new().expect("répertoire temporaire");
+    // MONO + wan2 + seconde route par défaut de même préfixe.
+    let ecmp = format!(
+        "{MONO}config system interface\n    edit \"wan2\"\n        set vdom \"root\"\n        \
+         set ip 198.51.100.2 255.255.255.252\n        set type physical\n        set role wan\n    next\nend\n\
+         config router static\n    edit 2\n        set gateway 198.51.100.1\n        set device \"wan2\"\n    next\nend\n"
+    );
+    std::fs::write(tmp.path().join("ecmp.conf"), ecmp).expect("écriture");
+    let out = calque(tmp.path(), &["import", "ecmp.conf"]);
+    assert_code(&out, 0);
+
+    let out = calque(tmp.path(), &["path", "10.20.1.5", "->", "8.8.8.8:443/tcp"]);
+    assert_code(&out, 3); // verdict non ferme, code dédié
+    let txt = stdout(&out);
+    assert!(txt.contains("NON FERME"), "sortie path : {txt}");
+    assert!(
+        txt.contains("wan : autorisé (sort du périmètre modélisé)"),
+        "la branche wan et son verdict : {txt}"
+    );
+    assert!(
+        txt.contains("wan2 : refusé"),
+        "la branche wan2 et son verdict : {txt}"
+    );
+}
+
+// ---------------------------------------------------------------------------
 // test (flows.yaml)
 // ---------------------------------------------------------------------------
 
@@ -417,9 +535,12 @@ fn reach_to_trouve_le_flux_autorise() {
 fn reach_from_liste_ce_que_la_dmz_atteint() {
     let tmp = projet_importe();
     // Politique 5 : h-srv-web (10.10.2.10) → wan, tout service. La route
-    // par défaut sort par « wan », interface sans lien modélisé : le
-    // rapport contient donc des parts non décidables, affichées
-    // honnêtement, et le code de sortie est 3 (rapport non ferme, §6.3).
+    // par défaut est SD-WAN à deux membres (wan/wan2) : ECMP. La politique
+    // 5 n'autorise que la sortie « wan » — les deux branches divergent
+    // (wan : autorisé, wan2 : refusé), donc ces parts restent non
+    // décidables, affichées honnêtement, et le code de sortie est 3
+    // (rapport non ferme, §6.3). Les hôtes du réseau connecté au wan
+    // restent atteints fermement (règle 5).
     let out = calque(tmp.path(), &["reach", "--from", "10.10.2.10"]);
     assert_code(&out, 3);
     let txt = stdout(&out);
@@ -489,24 +610,31 @@ fn reach_json_est_structure() {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn dead_rules_fixture_saine() {
+fn dead_rules_fixture_vip_masque() {
     let tmp = projet_importe();
-    // La fixture n'a pas de règle morte : les zones des politiques sont
-    // deux à deux incompatibles (et la politique 4, désactivée, n'est pas
-    // importée).
+    // La fixture porte UNE règle morte par construction : la politique 7
+    // (dstaddr g-vips, éclatée en une règle par VIP) recouvre la politique
+    // 6 (dstaddr vip-web-443) — sa règle `7:vip-web-443` est entièrement
+    // masquée par la règle 6. Le reste des politiques est deux à deux
+    // incompatible (et la politique 4, désactivée, n'est pas importée).
     let out = calque(tmp.path(), &["model", "dead-rules"]);
     assert_code(&out, 0);
     let txt = stdout(&out);
-    assert!(txt.contains("Aucune règle morte"), "sortie : {txt}");
+    assert!(txt.contains("MASQUÉE"), "sortie : {txt}");
+    assert!(txt.contains("règle 7:vip-web-443"), "sortie : {txt}");
     assert!(
-        txt.contains("1 équipement(s) analysé(s), 0 règle(s) morte(s), 0 exclue(s)."),
+        txt.contains("masquée par : la règle 6"),
+        "le masque : {txt}"
+    );
+    assert!(
+        txt.contains("1 équipement(s) analysé(s), 1 règle(s) morte(s), 0 exclue(s)."),
         "sortie : {txt}"
     );
 }
 
 #[test]
 fn dead_rules_detecte_une_regle_masquee() {
-    // La fixture augmentée d'une politique 6 identique à la 2 (mêmes
+    // La fixture augmentée d'une politique 9 identique à la 2 (mêmes
     // zones, mêmes objets) mais en refus : entièrement masquée par la 2.
     // L'edit est inséré DANS le bloc `config firewall policy` existant
     // (le dernier bloc de la fixture), pas dans un second bloc.
@@ -516,7 +644,7 @@ fn dead_rules_detecte_une_regle_masquee() {
         .strip_suffix("end")
         .expect("la fixture se termine par le `end` du bloc de politiques");
     let augmentee = format!(
-        "{tronc}    edit 6\n        set name \"doublon-mort\"\n        \
+        "{tronc}    edit 9\n        set name \"doublon-mort\"\n        \
          set srcintf \"lan\"\n        set dstintf \"z-dmz\"\n        set srcaddr \"r-postes\"\n        \
          set dstaddr \"h-srv-web\"\n        set action deny\n        set schedule \"always\"\n        \
          set service \"TCP-8443\"\n    next\nend\n"
@@ -529,15 +657,17 @@ fn dead_rules_detecte_une_regle_masquee() {
     assert_code(&out, 0);
     let txt = stdout(&out);
     assert!(txt.contains("MASQUÉE"), "sortie : {txt}");
-    assert!(txt.contains("règle 6"), "la règle morte : {txt}");
+    assert!(txt.contains("règle 9"), "la règle morte ajoutée : {txt}");
     assert!(
         txt.contains("masquée par : la règle 2"),
         "le masque : {txt}"
     );
     assert!(txt.contains("ligne 82"), "la ligne du masque : {txt}");
     assert!(txt.contains("paquet témoin"), "le témoin : {txt}");
+    // Deux règles mortes : celle que porte déjà la fixture
+    // (`7:vip-web-443`, voir `dead_rules_fixture_vip_masque`) et la 9.
     assert!(
-        txt.contains("1 équipement(s) analysé(s), 1 règle(s) morte(s), 0 exclue(s)."),
+        txt.contains("1 équipement(s) analysé(s), 2 règle(s) morte(s), 0 exclue(s)."),
         "sortie : {txt}"
     );
 }
@@ -549,7 +679,12 @@ fn dead_rules_json_est_structure() {
     assert_code(&out, 0);
     let v: serde_json::Value = serde_json::from_str(&stdout(&out)).expect("sortie JSON valide");
     assert_eq!(v["devices"], 1);
-    assert_eq!(v["rules"].as_array().expect("tableau rules").len(), 0);
+    // La règle morte inhérente à la fixture (voir
+    // `dead_rules_fixture_vip_masque`).
+    let rules = v["rules"].as_array().expect("tableau rules");
+    assert_eq!(rules.len(), 1);
+    assert_eq!(rules[0]["rule"], "7:vip-web-443");
+    assert_eq!(rules[0]["kind"], "Shadowed");
 }
 
 // ---------------------------------------------------------------------------

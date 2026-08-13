@@ -27,8 +27,8 @@ system_zone:
         interface: "dmz"
 router_static:
     - 1:
-        gateway: 10.200.0.1
-        device: "wan"
+        sdwan-zone: "SD-WAN"
+        comment: "route par defaut via les deux WAN"
         distance: 10
 firewall_address:
     - h-srv-web:
@@ -94,6 +94,99 @@ firewall_policy:
         dstintf: "wan"
         srcaddr: "h-srv-web"
         dstaddr: "all"
+        action: accept
+        schedule: "always"
+        service: "ALL"
+system_interface:
+    - wan2:
+        vdom: "root"
+        ip: [10.200.4.2, 255.255.255.252]
+        type: physical
+        role: wan
+    - vpn-site-a:
+        vdom: "root"
+        type: tunnel
+system_sdwan:
+    status: enable
+    zone:
+        - SD-WAN:
+    members:
+        - 1:
+            interface: "wan"
+            zone: "SD-WAN"
+            gateway: 10.200.0.1
+        - 2:
+            interface: "wan2"
+            zone: "SD-WAN"
+            gateway: 10.200.4.1
+    health-check:
+        - hc-dns:
+            server: "10.255.255.1"
+            members: [1, 2]
+vpn_ipsec_phase1-interface:
+    - vpn-site-a:
+        interface: "wan"
+        remote-gw: 10.201.0.1
+        proposal: aes256-sha256
+        dhgrp: 14
+        psksecret: "SecretFictifPartage"
+vpn_ipsec_phase2-interface:
+    - vpn-site-a-p2:
+        phase1name: "vpn-site-a"
+        src-name: "r-lan"
+        dst-name: "r-site-a"
+        proposal: aes256-sha256
+firewall_address:
+    - r-lan:
+        subnet: [10.10.1.0, 255.255.255.0]
+    - r-site-a:
+        subnet: [10.60.0.0, 255.255.0.0]
+firewall_vip:
+    - vip-web-443:
+        extip: 10.200.0.10
+        extintf: "wan"
+        portforward: enable
+        mappedip: "10.10.2.10"
+        protocol: tcp
+        extport: 443
+        mappedport: 8443
+    - vip-un-pour-un:
+        extip: 10.200.0.11
+        extintf: "wan"
+        mappedip: "10.10.2.11"
+firewall_vipgrp:
+    - g-vips:
+        member: ["vip-web-443", "vip-un-pour-un"]
+router_static:
+    - 2:
+        dstaddr: "r-site-a"
+        device: "vpn-site-a"
+        distance: 15
+firewall_policy:
+    - 6:
+        name: "wan-vers-dmz-web"
+        srcintf: "wan"
+        dstintf: "z-dmz"
+        srcaddr: "all"
+        dstaddr: "vip-web-443"
+        action: accept
+        schedule: "always"
+        service: "ALL"
+    - 7:
+        name: "wan-vers-dmz-vips"
+        srcintf: "wan"
+        dstintf: "z-dmz"
+        srcaddr: "all"
+        dstaddr: "g-vips"
+        action: accept
+        schedule: "always"
+        service: "ALL"
+    - 8:
+        name: "lan-vers-site-a"
+        srcintf: "lan"
+        dstintf: "vpn-site-a"
+        srcaddr: "r-lan"
+        dstaddr: "r-site-a"
         action: accept
         schedule: "always"
         service: "ALL"

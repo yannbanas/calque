@@ -7,9 +7,9 @@
 //! `Fidelity::Partial` (§6.3 : ne jamais deviner).
 
 use calque_model::{
-    Action, AddrExpr, AddrObject, AdminState, Device, Fidelity, IfaceId, Interface, NextHop,
-    ObjectId, PolicyId, PortRange, ProtoMatch, RouteOrigin, ServiceExpr, ServiceObject, Severity,
-    VrfId, ZoneId,
+    Action, AddrExpr, AddrObject, AdminState, Device, DnatTarget, Fidelity, IfaceId, Interface,
+    NatAction, NextHop, ObjectId, PolicyId, PortRange, ProtoMatch, RouteOrigin, Service,
+    ServiceExpr, ServiceObject, Severity, VrfId, ZoneId,
 };
 use calque_vendors::fortigate::FortigateAdapter;
 use calque_vendors::{AdapterOutput, VendorAdapter};
@@ -77,16 +77,48 @@ fn fidelite_complete_sur_la_fixture() {
         Fidelity::Complete,
         "la fixture ne contient que des directives gérées"
     );
-    // La politique 4 désactivée produit une note Info — un constat,
-    // pas une incompréhension.
+    // Quatre constats Info (pas des incompréhensions), dans l'ordre du
+    // fichier : health-check SD-WAN, topologie du tunnel IPsec, politique
+    // 4 désactivée, politique 7 éclatée (une règle par VIP).
     let infos: Vec<_> = out
         .notes
         .iter()
         .filter(|n| n.severity == Severity::Info)
         .collect();
-    assert_eq!(infos.len(), 1);
-    assert!(infos[0].message.contains("politique 4"));
-    assert!(infos[0].message.contains("désactivée"));
+    assert_eq!(infos.len(), 4, "{infos:?}");
+    assert!(infos[0].message.contains("health-check SD-WAN `hc-dns`"));
+    assert!(infos[1].message.contains("tunnel IPsec `vpn-site-a`"));
+    assert!(infos[1].message.contains("10.201.0.1"));
+    assert!(infos[1].message.contains("via `wan`"));
+    assert!(infos[2].message.contains("politique 4"));
+    assert!(infos[2].message.contains("désactivée"));
+    assert!(infos[3].message.contains("politique 7 éclatée"));
+    // Aucun avertissement : toutes les références de la fixture se
+    // résolvent.
+    assert!(
+        out.notes.iter().all(|n| n.severity == Severity::Info),
+        "{:?}",
+        out.notes
+    );
+}
+
+/// §11.4 — le secret pré-partagé du tunnel IPsec ne fuit JAMAIS dans un
+/// diagnostic, quelle que soit la sévérité.
+#[test]
+fn psksecret_absent_de_tous_les_diagnostics() {
+    let out = import_basic();
+    assert!(
+        BASIC.contains("SecretFictifPartage"),
+        "le secret est bien là"
+    );
+    for note in &out.notes {
+        assert!(!note.message.contains("SecretFictifPartage"), "{note:?}");
+    }
+    if let Fidelity::Partial { unsupported } = &out.fidelity {
+        for d in unsupported {
+            assert!(!d.message.contains("SecretFictifPartage"), "{d:?}");
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -101,7 +133,7 @@ fn interfaces_adresses_et_etat() {
         "fw-lab-01",
         "le hostname prime sur le nom de fichier"
     );
-    assert_eq!(dev.interfaces.len(), 3);
+    assert_eq!(dev.interfaces.len(), 5);
 
     let lan = iface(&dev, "lan");
     assert_eq!(lan.addrs, vec!["10.10.1.1/24".parse().unwrap()]);
@@ -115,14 +147,29 @@ fn interfaces_adresses_et_etat() {
 
     let wan = iface(&dev, "wan");
     assert_eq!(wan.addrs, vec!["10.200.0.2/30".parse().unwrap()]);
+
+    let wan2 = iface(&dev, "wan2");
+    assert_eq!(wan2.addrs, vec!["10.200.4.2/30".parse().unwrap()]);
+
+    // L'interface tunnel IPsec, sans adresse (type tunnel).
+    let tunnel = iface(&dev, "vpn-site-a");
+    assert!(tunnel.addrs.is_empty());
+    assert_eq!(tunnel.state, AdminState::Up);
 }
 
 #[test]
 fn zones_explicites_et_implicites() {
     let dev = import_basic().device;
-    // z-dmz est déclarée ; lan et wan sont des zones implicites créées
-    // parce que les politiques référencent ces interfaces directement.
-    assert_eq!(dev.zones.len(), 3);
+    // z-dmz est déclarée ; lan, wan et vpn-site-a sont des zones
+    // implicites créées parce que les politiques (et la politique IPsec
+    // de sortie) référencent ces interfaces directement ; SD-WAN est la
+    // zone des membres SD-WAN (les politiques `dstintf "SD-WAN"` doivent
+    // s'appliquer quand le paquet sort par un membre).
+    assert_eq!(dev.zones.len(), 5);
+    assert_eq!(
+        dev.zones.get(&ZoneId::new("SD-WAN")),
+        Some(&vec![IfaceId::new("wan"), IfaceId::new("wan2")])
+    );
     assert_eq!(
         dev.zones.get(&ZoneId::new("z-dmz")),
         Some(&vec![IfaceId::new("dmz")])
@@ -134,6 +181,10 @@ fn zones_explicites_et_implicites() {
     assert_eq!(
         dev.zones.get(&ZoneId::new("wan")),
         Some(&vec![IfaceId::new("wan")])
+    );
+    assert_eq!(
+        dev.zones.get(&ZoneId::new("vpn-site-a")),
+        Some(&vec![IfaceId::new("vpn-site-a")])
     );
     // L'appartenance implicite est aussi visible côté interface.
     assert_eq!(
@@ -147,21 +198,56 @@ fn zones_explicites_et_implicites() {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn route_statique_par_defaut() {
+fn route_par_defaut_sdwan_une_route_par_membre() {
     let dev = import_basic().device;
     let vrf = dev
         .vrfs
         .get(&VrfId::default_vrf())
         .expect("le VRF par défaut existe");
-    assert_eq!(vrf.routes.len(), 1);
-    let r = &vrf.routes[0];
-    assert_eq!(r.prefix, "0.0.0.0/0".parse().unwrap());
-    assert_eq!(r.next_hop, NextHop::Ip("10.200.0.1".parse().unwrap()));
-    assert_eq!(r.metric, 10);
+    // La route par défaut `set sdwan-zone "SD-WAN"` (deux membres) est
+    // développée en DEUX routes candidates de même préfixe et même
+    // métrique (ECMP, évaluées par branches par le moteur), plus la
+    // route par objet vers le site distant.
+    assert_eq!(vrf.routes.len(), 3, "{:?}", vrf.routes);
+
+    let r1 = &vrf.routes[0];
+    assert_eq!(r1.prefix, "0.0.0.0/0".parse().unwrap());
+    assert_eq!(r1.next_hop, NextHop::Ip("10.200.0.1".parse().unwrap()));
+    assert_eq!(r1.metric, 10);
+    assert_eq!(r1.origin, RouteOrigin::Static);
+
+    let r2 = &vrf.routes[1];
+    assert_eq!(r2.prefix, "0.0.0.0/0".parse().unwrap());
+    assert_eq!(r2.next_hop, NextHop::Ip("10.200.4.1".parse().unwrap()));
+    assert_eq!(r2.metric, 10);
+
+    // Les deux candidates portent le span de la MÊME route source.
+    for r in [r1, r2] {
+        let span = r.source.as_ref().expect("une route porte son origine");
+        assert_eq!(span.file, FILE);
+        assert_eq!(span.line, 35); // `edit 1` de `config router static`
+        assert_eq!(span.end_line, Some(39));
+    }
+}
+
+#[test]
+fn route_par_objet_adresse() {
+    let dev = import_basic().device;
+    let vrf = dev
+        .vrfs
+        .get(&VrfId::default_vrf())
+        .expect("le VRF par défaut existe");
+    // `set dstaddr "r-site-a"` (10.60.0.0/16) + `set device
+    // "vpn-site-a"` → une route par préfixe de l'objet.
+    let r = &vrf.routes[2];
+    assert_eq!(r.prefix, "10.60.0.0/16".parse().unwrap());
+    assert_eq!(r.next_hop, NextHop::Interface(IfaceId::new("vpn-site-a")));
+    assert_eq!(r.metric, 15);
     assert_eq!(r.origin, RouteOrigin::Static);
     let span = r.source.as_ref().expect("une route porte son origine");
     assert_eq!(span.file, FILE);
-    assert_eq!(span.line, 35); // ligne du `edit 1` de `config router static`
+    assert_eq!(span.line, 208); // `edit 2` du second bloc router static
+    assert_eq!(span.end_line, Some(212));
 }
 
 // ---------------------------------------------------------------------------
@@ -171,7 +257,8 @@ fn route_statique_par_defaut() {
 #[test]
 fn objets_adresses_et_groupe() {
     let dev = import_basic().device;
-    assert_eq!(dev.objects.addresses.len(), 3); // 2 objets + 1 groupe
+    // 4 objets + 1 groupe + 2 VIP + 1 groupe de VIP.
+    assert_eq!(dev.objects.addresses.len(), 8);
 
     // Hôte /32.
     match addr_obj(&dev, "h-srv-web") {
@@ -206,6 +293,35 @@ fn objets_adresses_et_groupe() {
             assert_eq!(noms, vec!["h-srv-web", "r-postes"]);
         }
         other => panic!("g-serveurs devrait être un groupe : {other:?}"),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// VIP : objets adresse résolus + groupe
+// ---------------------------------------------------------------------------
+
+#[test]
+fn vips_resolus_en_objets_adresse() {
+    let dev = import_basic().device;
+
+    // Chaque VIP est un objet adresse portant son adresse EXTERNE : les
+    // `dstaddr "vip-…"` des politiques se résolvent.
+    assert_eq!(
+        addr_obj(&dev, "vip-web-443"),
+        &AddrObject::Nets(vec!["10.200.0.10/32".parse().unwrap()])
+    );
+    assert_eq!(
+        addr_obj(&dev, "vip-un-pour-un"),
+        &AddrObject::Nets(vec!["10.200.0.11/32".parse().unwrap()])
+    );
+
+    // Le groupe de VIP est un groupe d'objets adresse ordinaire.
+    match addr_obj(&dev, "g-vips") {
+        AddrObject::Group(members) => {
+            let noms: Vec<&str> = members.iter().map(|m| m.as_str()).collect();
+            assert_eq!(noms, vec!["vip-web-443", "vip-un-pour-un"]);
+        }
+        other => panic!("g-vips devrait être un groupe : {other:?}"),
     }
 }
 
@@ -268,19 +384,32 @@ fn politique_ordre_actions_et_spans() {
     let dev = import_basic().device;
 
     // La politique forward est accrochée en entrée (filtrage forward
-    // FortiGate, choix documenté dans l'adaptateur).
-    assert_eq!(dev.policies.len(), 1);
+    // FortiGate, choix documenté dans l'adaptateur) ; la politique de
+    // sortie IPsec est testée à part.
+    assert_eq!(dev.policies.len(), 2);
     let policy = dev
         .policies
         .get(&PolicyId::new("forward"))
         .expect("la politique forward existe");
     assert_eq!(dev.pipeline.ingress, vec![policy.id.clone()]);
-    assert!(dev.pipeline.egress.is_empty());
     assert_eq!(policy.default_action, Action::Deny);
 
-    // ORDRE SIGNIFICATIF : 1, 2, 3, 5 — la 4 (désactivée) est écartée.
+    // ORDRE SIGNIFICATIF : la 4 (désactivée) est écartée, la 7 est
+    // ÉCLATÉE en une règle par VIP du groupe (identifiants suffixés).
     let ids: Vec<&str> = policy.rules.iter().map(|r| r.id.as_str()).collect();
-    assert_eq!(ids, vec!["1", "2", "3", "5"]);
+    assert_eq!(
+        ids,
+        vec![
+            "1",
+            "2",
+            "3",
+            "5",
+            "6",
+            "7:vip-web-443",
+            "7:vip-un-pour-un",
+            "8"
+        ]
+    );
 
     // Règle 1 : lan → wan, tout, NAT activé.
     let r1 = &policy.rules[0];
@@ -329,6 +458,180 @@ fn politique_ordre_actions_et_spans() {
 }
 
 // ---------------------------------------------------------------------------
+// VIP : DNAT porté par les règles, éclatement multi-VIP
+// ---------------------------------------------------------------------------
+
+#[test]
+fn regle_vers_vip_porte_le_dnat() {
+    let dev = import_basic().device;
+    let policy = dev
+        .policies
+        .get(&PolicyId::new("forward"))
+        .expect("la politique forward existe");
+
+    // Règle 6 : un seul VIP à redirection de port — identifiant intact.
+    let r6 = policy
+        .rules
+        .iter()
+        .find(|r| r.id.as_str() == "6")
+        .expect("règle 6");
+    assert_eq!(r6.from.as_ref().map(|z| z.as_str()), Some("wan"));
+    assert_eq!(r6.to.as_ref().map(|z| z.as_str()), Some("z-dmz"));
+    assert_eq!(
+        r6.matches.dst,
+        vec![AddrExpr::Object(ObjectId::new("vip-web-443"))]
+    );
+    // `set protocol tcp` + `set extport 443` contraignent le service de
+    // la règle (le `service "ALL"` d'origine est remplacé EXACTEMENT).
+    assert_eq!(
+        r6.matches.services,
+        vec![ServiceExpr::Service(Service::tcp_dport(PortRange::single(
+            443
+        )))]
+    );
+    // La règle porte la redirection : extip:443 → mappedip:8443.
+    assert_eq!(
+        r6.action,
+        Action::Nat(NatAction {
+            snat: None,
+            dnat: Some(DnatTarget {
+                addr: "10.10.2.10".parse().unwrap(),
+                port: Some(8443),
+            }),
+        })
+    );
+    assert_eq!(r6.source.line, 215);
+    assert_eq!(r6.source.end_line, Some(224));
+}
+
+#[test]
+fn regle_multi_vip_eclatee_une_regle_par_vip() {
+    let dev = import_basic().device;
+    let policy = dev
+        .policies
+        .get(&PolicyId::new("forward"))
+        .expect("la politique forward existe");
+
+    // Règle 7 (`dstaddr "g-vips"`) : deux VIP aux cibles DIFFÉRENTES →
+    // deux règles, une par VIP, même span (celui du `edit 7`).
+    let r7a = policy
+        .rules
+        .iter()
+        .find(|r| r.id.as_str() == "7:vip-web-443")
+        .expect("règle 7:vip-web-443");
+    let r7b = policy
+        .rules
+        .iter()
+        .find(|r| r.id.as_str() == "7:vip-un-pour-un")
+        .expect("règle 7:vip-un-pour-un");
+
+    assert_eq!(
+        r7a.matches.dst,
+        vec![AddrExpr::Object(ObjectId::new("vip-web-443"))]
+    );
+    assert_eq!(
+        r7a.action,
+        Action::Nat(NatAction {
+            snat: None,
+            dnat: Some(DnatTarget {
+                addr: "10.10.2.10".parse().unwrap(),
+                port: Some(8443),
+            }),
+        })
+    );
+
+    // VIP 1:1 : DNAT d'adresse seule, ports préservés, service d'origine
+    // (`ALL`) conservé.
+    assert_eq!(
+        r7b.matches.dst,
+        vec![AddrExpr::Object(ObjectId::new("vip-un-pour-un"))]
+    );
+    assert_eq!(r7b.matches.services, vec![ServiceExpr::Any]);
+    assert_eq!(
+        r7b.action,
+        Action::Nat(NatAction {
+            snat: None,
+            dnat: Some(DnatTarget {
+                addr: "10.10.2.11".parse().unwrap(),
+                port: None,
+            }),
+        })
+    );
+
+    // Même origine : les deux règles remontent au `edit 7`.
+    for r in [r7a, r7b] {
+        assert_eq!(r.source.file, FILE);
+        assert_eq!(r.source.line, 225);
+        assert_eq!(r.source.end_line, Some(234));
+    }
+}
+
+// ---------------------------------------------------------------------------
+// IPsec : sélecteurs phase2 → politique de sortie sur le tunnel
+// ---------------------------------------------------------------------------
+
+#[test]
+fn politique_ipsec_egress_sur_le_tunnel() {
+    let dev = import_basic().device;
+
+    // La politique `ipsec:vpn-site-a` est accrochée en SORTIE. Dans le
+    // pipeline chaîné du moteur elle voit AUSSI le trafic hors tunnel :
+    // défaut Accept, et le rejet FortiGate (« ce qui ne matche aucun
+    // sélecteur est jeté ») est porté par la règle FINALE
+    // `ipsec-implicit-deny`, scopée à la zone du tunnel.
+    let pid = PolicyId::new("ipsec:vpn-site-a");
+    assert_eq!(dev.pipeline.egress, vec![pid.clone()]);
+    let policy = dev.policies.get(&pid).expect("la politique ipsec existe");
+    assert_eq!(policy.default_action, Action::Accept);
+    assert_eq!(policy.rules.len(), 2);
+    let deny = &policy.rules[1];
+    assert_eq!(deny.id.as_str(), "ipsec-implicit-deny");
+    assert_eq!(deny.action, Action::Deny);
+    assert_eq!(deny.to.as_ref().map(|z| z.as_str()), Some("vpn-site-a"));
+    assert!(deny.matches.src.is_empty() && deny.matches.dst.is_empty());
+
+    // Le sélecteur : src r-lan → dst r-site-a, Accept, zone de sortie =
+    // l'interface tunnel.
+    let sel = &policy.rules[0];
+    assert_eq!(sel.id.as_str(), "vpn-site-a-p2");
+    assert_eq!(sel.from, None);
+    assert_eq!(sel.to.as_ref().map(|z| z.as_str()), Some("vpn-site-a"));
+    assert_eq!(
+        sel.matches.src,
+        vec![AddrExpr::Object(ObjectId::new("r-lan"))]
+    );
+    assert_eq!(
+        sel.matches.dst,
+        vec![AddrExpr::Object(ObjectId::new("r-site-a"))]
+    );
+    assert!(sel.matches.services.is_empty(), "tous services");
+    assert_eq!(sel.action, Action::Accept);
+
+    // Span exact : le `edit "vpn-site-a-p2"` du bloc phase2.
+    assert_eq!(sel.source.file, FILE);
+    assert_eq!(sel.source.line, 171);
+    assert_eq!(sel.source.end_line, Some(176));
+}
+
+#[test]
+fn regle_vers_le_tunnel_ipsec() {
+    let dev = import_basic().device;
+    let policy = dev
+        .policies
+        .get(&PolicyId::new("forward"))
+        .expect("la politique forward existe");
+    // Règle 8 : lan → interface tunnel (zone implicite du même nom).
+    let r8 = policy
+        .rules
+        .iter()
+        .find(|r| r.id.as_str() == "8")
+        .expect("règle 8");
+    assert_eq!(r8.from.as_ref().map(|z| z.as_str()), Some("lan"));
+    assert_eq!(r8.to.as_ref().map(|z| z.as_str()), Some("vpn-site-a"));
+    assert_eq!(r8.action, Action::Accept);
+}
+
+// ---------------------------------------------------------------------------
 // §6.3 — ne jamais deviner : directive exotique → diagnostic + Partial
 // ---------------------------------------------------------------------------
 
@@ -361,7 +664,10 @@ fn directive_exotique_degrade_la_fidelite() {
         .expect("la directive inconnue doit être diagnostiquée");
     let span = gadget.span.as_ref().expect("le diagnostic porte un span");
     assert_eq!(span.file, FILE);
-    assert!(span.line > 123, "le span pointe dans le bloc ajouté");
+    assert!(
+        span.line > BASIC.lines().count() as u32,
+        "le span pointe dans le bloc ajouté"
+    );
 }
 
 // ---------------------------------------------------------------------------

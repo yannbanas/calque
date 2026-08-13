@@ -1,6 +1,8 @@
 //! Les types de trace (§5.2). La trace EST le produit : un verdict sans la
 //! règle qui l'a produit ne vaut rien.
 
+use std::net::IpAddr;
+
 use calque_model::{ConcretePacket, DeviceId, Diagnostic, IfaceId, RuleId, SourceSpan};
 use serde::{Deserialize, Serialize};
 
@@ -81,7 +83,7 @@ impl std::fmt::Display for Stage {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Outcome {
     /// La règle correspond et accepte le paquet (décisive).
     Accepted,
@@ -104,12 +106,35 @@ pub enum Outcome {
     RouteDrop,
     /// En-tête réécrit par une traduction d'adresse (étape `Nat`).
     Rewritten,
+    /// La route retenue fait SORTIR le paquet du périmètre modélisé (étape
+    /// `Route`) : la destination n'appartient à aucun équipement ni réseau
+    /// du modèle ET l'interface de sortie n'a aucun lien. Le verdict global
+    /// reste celui des filtres (typiquement `Allowed`), mais le rendu DOIT
+    /// mentionner la sortie de périmètre — jamais un « autorisé » silencieux
+    /// qui laisserait croire que la destination est modélisée.
+    ExitsModel {
+        /// L'interface par laquelle le paquet quitte le périmètre.
+        iface: IfaceId,
+        /// La passerelle hors modèle, absente pour une route d'interface
+        /// (ex. tunnel IPsec sans adresse).
+        gateway: Option<IpAddr>,
+    },
+    /// Plusieurs routes optimales divergentes (ECMP, étape `Route`) : chaque
+    /// branche a été évaluée et TOUTES mènent au même verdict — ce verdict
+    /// est donc ferme. La trace détaillée suit la PREMIÈRE branche (choix
+    /// documenté ; un diagnostic informatif le rappelle).
+    EcmpAgreed { ifaces: Vec<IfaceId> },
+    /// Plusieurs routes optimales divergentes (ECMP) aux verdicts
+    /// DIVERGENTS selon la branche : verdict `Unknown`, chaque branche et
+    /// son verdict sont détaillés dans les diagnostics (§6.3 : ne jamais
+    /// deviner — mais dire exactement ce qui diverge).
+    EcmpDiverged { ifaces: Vec<IfaceId> },
 }
 
 impl Outcome {
-    /// Libellé français de l'issue — le vocabulaire des traces rendues
-    /// (identique à celui de `calque-report`).
-    pub fn label(self) -> &'static str {
+    /// Libellé français STATIQUE de l'issue (sans les parties dynamiques —
+    /// interface, passerelle… — que `Display` ajoute).
+    pub fn label(&self) -> &'static str {
         match self {
             Outcome::Accepted => "accepté",
             Outcome::Denied => "refusé",
@@ -120,12 +145,51 @@ impl Outcome {
             Outcome::NoRoute => "aucune route vers la destination",
             Outcome::RouteDrop => "route de rejet explicite",
             Outcome::Rewritten => "en-tête réécrit",
+            Outcome::ExitsModel { .. } => "sort du périmètre modélisé",
+            Outcome::EcmpAgreed { .. } => {
+                "routes multiples (ECMP), verdict identique sur toutes les branches"
+            }
+            Outcome::EcmpDiverged { .. } => {
+                "routes multiples (ECMP), verdicts divergents selon la branche"
+            }
         }
     }
 }
 
+/// Liste d'interfaces séparées par des virgules (« wan1, wan2 »).
+fn ifaces_label(ifaces: &[IfaceId]) -> String {
+    ifaces
+        .iter()
+        .map(|i| i.to_string())
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
 impl std::fmt::Display for Outcome {
+    /// Le libellé complet, parties dynamiques comprises — c'est ce texte
+    /// que les rendus (`calque-report` via la CLI) affichent.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.label())
+        match self {
+            Outcome::ExitsModel { iface, gateway } => match gateway {
+                Some(gw) => write!(
+                    f,
+                    "sort du périmètre modélisé via {iface} (passerelle {gw})"
+                ),
+                None => write!(f, "sort du périmètre modélisé via {iface}"),
+            },
+            Outcome::EcmpAgreed { ifaces } => write!(
+                f,
+                "{} routes candidates ({}) : verdict identique sur toutes les branches",
+                ifaces.len(),
+                ifaces_label(ifaces)
+            ),
+            Outcome::EcmpDiverged { ifaces } => write!(
+                f,
+                "{} routes candidates ({}) : verdicts divergents selon la branche",
+                ifaces.len(),
+                ifaces_label(ifaces)
+            ),
+            other => f.write_str(other.label()),
+        }
     }
 }

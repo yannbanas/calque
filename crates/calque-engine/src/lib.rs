@@ -21,7 +21,13 @@
 //! - ordre des règles sémantique : première correspondance gagne, et les
 //!   règles masquées sont signalées via `Decision::shadowed_by` (§5.2) ;
 //! - ne jamais deviner (§6.3) : tout élément manquant ou ambigu sur le
-//!   chemin produit un verdict `Unknown` accompagné d'un diagnostic.
+//!   chemin produit un verdict `Unknown` accompagné d'un diagnostic ;
+//! - mais répondre FERMEMENT quand le périmètre modélisé le permet : un flux
+//!   routé hors du modèle est une sortie de périmètre explicite
+//!   (`Outcome::ExitsModel`, verdict des filtres), et un ECMP est évalué
+//!   PAR BRANCHES (verdict ferme si toutes les branches s'accordent, sinon
+//!   `Unknown` avec le verdict de chaque branche) — « ne jamais deviner »
+//!   n'oblige pas à ne jamais répondre.
 
 pub mod dead;
 pub mod engine;
@@ -43,13 +49,13 @@ mod testutil;
 pub use dead::{
     dead_rules, dead_rules_report, DeadRule, DeadRuleKind, DeadRulesReport, Masker, MAX_UNION_CUBES,
 };
-pub use engine::{trace_packet, trace_packet_from};
+pub use engine::{trace_packet, trace_packet_from, MAX_ECMP_TOTAL_BRANCHES};
 pub use error::EvalError;
 pub use policy::{evaluate_policy, FilterPoint, FilterResult, NatGrant, PolicyEvaluation};
 pub use prepare::prepare_for_engine;
 pub use reach::{reach_from, reach_to, ReachFlow, ReachReport};
 pub use resolve::packet_matches_rule;
-pub use route::{lookup_route, RouteDecision};
+pub use route::{lookup_route, EcmpRoute, RouteDecision, MAX_ECMP_ROUTES};
 pub use symbolic::rule_headerset;
 pub use sympolicy::{evaluate_policy_symbolic, SymFilterResult, SymbolicPart, MAX_CUBES};
 pub use symtrace::{

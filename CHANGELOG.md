@@ -7,7 +7,28 @@ majeur.
 
 ## [Unreleased]
 
-Rien pour l'instant.
+### Ajouté
+
+- **Modélisation FortiGate étendue** — `firewall vip`/`vipgrp` (objets
+  adresse + DNAT exact porté par les règles, éclatement traçable des
+  règles multi-VIP), routes par objet (`set dstaddr`), `system sdwan`
+  (zone des membres + une route candidate par WAN), sélecteurs IPsec
+  phase2 (filtre de sortie du tunnel). Les tunnels, publications et sortie
+  Internet d'une configuration réelle deviennent analysables.
+- **Sortie de périmètre modélisé** — un flux qui quitte le modèle (Internet
+  via WAN, site distant via tunnel) reçoit un verdict FERME (« autorisé,
+  sort du périmètre modélisé via wan2 ») au lieu d'« indéterminé », dès
+  lors que la destination n'appartient à aucun réseau du modèle et que
+  l'interface de sortie n'a aucun lien. Un vrai trou de topologie interne
+  reste indéterminé.
+- **Routage ECMP par branches** — plusieurs routes optimales (SD-WAN
+  multi-WAN) sont toutes évaluées : verdict ferme si elles s'accordent,
+  sinon indéterminé avec le détail par branche (« wan1 : autorisé ;
+  wan2 : refusé par la règle X »). Concret et symbolique.
+- **`calque test --allow-partial`** — rend les verdicts sur la partie
+  modélisée même quand le modèle est partiel (le cas d'une configuration
+  réelle), avec un avertissement ; sans le drapeau, le refus de verdict
+  ferme (§6.3) reste le défaut.
 
 ## [0.3.0] — 2026-08-13
 

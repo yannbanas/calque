@@ -112,13 +112,31 @@ pub struct HopView {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TraceView {
     pub verdict: VerdictView,
+    /// Précision OBLIGATOIRE à afficher à côté du verdict quand il en porte
+    /// une — le cas d'usage : « sort du périmètre modélisé via wan1,
+    /// passerelle 79.141.8.65 ». Un « autorisé » en sortie de périmètre ne
+    /// doit jamais laisser croire que la destination est modélisée.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verdict_note: Option<String>,
     pub hops: Vec<HopView>,
+}
+
+impl TraceView {
+    /// La ligne de verdict, note comprise : « autorisé (sort du périmètre
+    /// modélisé via wan1) » — jamais un « autorisé » nu quand une note
+    /// existe.
+    pub fn verdict_line(&self) -> String {
+        match &self.verdict_note {
+            Some(note) => format!("{} ({note})", self.verdict),
+            None => self.verdict.to_string(),
+        }
+    }
 }
 
 /// Rendu texte d'une trace, règle par règle (`calque path --explain`).
 pub fn render_trace_text(trace: &TraceView) -> String {
     let mut out = String::new();
-    let _ = writeln!(out, "Verdict : {}", trace.verdict);
+    let _ = writeln!(out, "Verdict : {}", trace.verdict_line());
     for (i, hop) in trace.hops.iter().enumerate() {
         let _ = write!(
             out,
@@ -858,6 +876,7 @@ mod tests {
     fn rendu_texte_dune_trace() {
         let trace = TraceView {
             verdict: VerdictView::Denied,
+            verdict_note: None,
             hops: vec![HopView {
                 device: "fw-01".into(),
                 in_iface: "port1".into(),
@@ -927,11 +946,60 @@ mod tests {
     fn rendu_json_dune_trace() {
         let trace = TraceView {
             verdict: VerdictView::Allowed,
+            verdict_note: None,
             hops: vec![],
         };
         let json = render_trace_json(&trace);
         let v: serde_json::Value = serde_json::from_str(&json).unwrap();
         assert_eq!(v["verdict"], "Allowed");
+        // Sans note, le champ est absent du JSON (compatibilité).
+        assert!(v.get("verdict_note").is_none());
+    }
+
+    /// La sortie de périmètre modélisé : la ligne de verdict porte la note
+    /// (« autorisé (sort du périmètre modélisé via wan1…) »), jamais un
+    /// « autorisé » nu qui laisserait croire que la destination est
+    /// modélisée.
+    #[test]
+    fn rendu_dune_trace_en_sortie_de_perimetre() {
+        let trace = TraceView {
+            verdict: VerdictView::Allowed,
+            verdict_note: Some(
+                "sort du périmètre modélisé via wan1, passerelle 79.141.8.65".into(),
+            ),
+            hops: vec![HopView {
+                device: "fw-01".into(),
+                in_iface: "lan".into(),
+                out_iface: Some("wan1".into()),
+                header_in: None,
+                header_out: None,
+                decisions: vec![DecisionView {
+                    stage: StageView::Route,
+                    rule: None,
+                    source: None,
+                    outcome: "sort du périmètre modélisé via wan1 (passerelle 79.141.8.65)".into(),
+                    shadowed_by: vec![],
+                }],
+            }],
+        };
+        let txt = render_trace_text(&trace);
+        assert!(
+            txt.contains(
+                "Verdict : autorisé (sort du périmètre modélisé via wan1, \
+                 passerelle 79.141.8.65)"
+            ),
+            "{txt}"
+        );
+        assert!(
+            txt.contains("routage : sort du périmètre modélisé via wan1 (passerelle 79.141.8.65)"),
+            "{txt}"
+        );
+        // JSON : la note est sérialisée quand elle existe.
+        let v: serde_json::Value = serde_json::from_str(&render_trace_json(&trace)).unwrap();
+        assert!(v["verdict_note"]
+            .as_str()
+            .unwrap()
+            .contains("sort du périmètre"));
     }
 
     // -- Résumé d'un HeaderSet ------------------------------------------
