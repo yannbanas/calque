@@ -7,6 +7,10 @@ majeur.
 
 ## [Unreleased]
 
+Rien pour l'instant.
+
+## [0.2.0] — 2026-08-13
+
 ### Ajouté
 
 - **Deux nouveaux constructeurs** : OPNsense/pfSense (config.xml, couche 1
@@ -37,6 +41,13 @@ majeur.
 - `calque model dead-rules` : une règle irrésoluble hors ligne (objet
   fqdn/geography, VIP…) est exclue avec diagnostic au lieu d'interrompre
   toute l'analyse (abstention sûre, jamais un faux positif).
+
+### Sécurité
+
+- quick-xml 0.37 → 0.41 (RUSTSEC-2026-0194, RUSTSEC-2026-0195).
+- RUSTSEC-2023-0071 (`rsa` via russh, feature `collect` désactivée par
+  défaut) : exception datée et justifiée dans `deny.toml`, aucun
+  correctif amont disponible.
 
 ## [0.1.0] — 2026-08-12
 
@@ -96,5 +107,6 @@ sur des configurations de production.
 - Pas éprouvé sur des configurations de production ; les retours de
   terrain sont bienvenus.
 
-[Unreleased]: https://github.com/yannbanas/calque/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/yannbanas/calque/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/yannbanas/calque/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/yannbanas/calque/releases/tag/v0.1.0
