@@ -33,9 +33,17 @@ ignore = true
 db-path = "$CARGO_HOME/advisory-dbs"
 db-urls = ["https://github.com/rustsec/advisory-db"]
 yanked = "deny"
-# Pas d'exception pour l'instant. Toute exception future doit être datée
-# et justifiée ici.
-ignore = []
+# Toute exception doit être datée et justifiée ici.
+#
+# RUSTSEC-2023-0071 (2026-08-12) — « Marvin Attack » sur le crate `rsa`,
+# tiré par russh via calque-collect. Aucun correctif amont disponible
+# (« No safe upgrade is available »). Exposition limitée : calque-collect
+# est derrière la feature Cargo `collect`, DÉSACTIVÉE par défaut — le
+# binaire distribué ne compile pas cette pile ; et l'attaque exige de
+# mesurer finement les temps de déchiffrement RSA côté client SSH, un
+# scénario marginal pour un outil de collecte ponctuelle. À réévaluer à
+# chaque montée de version de russh.
+ignore = ["RUSTSEC-2023-0071"]
 
 [bans]
 # Plusieurs versions d'un même crate : toléré (transitif, fréquent),

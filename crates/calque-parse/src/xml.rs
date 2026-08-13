@@ -153,9 +153,10 @@ pub fn parse(input: &str, filename: &str) -> Result<ConfigTree, ParseError> {
                 // Ligne du premier caractère NON BLANC : un fragment de
                 // texte commence souvent au saut de ligne précédent.
                 let lead = t.iter().take_while(|b| b.is_ascii_whitespace()).count();
-                // Entités standard et références numériques décodées ici ;
-                // une entité inconnue (DTD, externe) est une ERREUR.
-                let text = t.unescape().map_err(|e| ParseError::MalformedXml {
+                // Depuis quick-xml 0.41, les événements Text ne portent
+                // plus d'entités (elles arrivent en `GeneralRef`) : ici,
+                // seulement décodage + normalisation des fins de ligne.
+                let text = t.xml10_content().map_err(|e| ParseError::MalformedXml {
                     file: filename.to_owned(),
                     line,
                     message: e.to_string(),
@@ -189,6 +190,35 @@ pub fn parse(input: &str, filename: &str) -> Result<ConfigTree, ParseError> {
                                 message: "section CDATA hors de tout élément".to_owned(),
                             });
                         }
+                    }
+                }
+            }
+            // Depuis quick-xml 0.41, une référence d'entité (`&amp;`,
+            // `&#38;`…) est un événement distinct du texte. Les entités
+            // prédéfinies et les références numériques sont résolues par
+            // le résolveur du crate ; une entité inconnue (DTD, externe)
+            // reste une ERREUR — jamais résolue (pas de XXE, en-tête).
+            Ok(Event::GeneralRef(r)) => {
+                let name = r.decode().map_err(|e| ParseError::MalformedXml {
+                    file: filename.to_owned(),
+                    line,
+                    message: e.to_string(),
+                })?;
+                let raw = format!("&{name};");
+                let resolved =
+                    quick_xml::escape::unescape(&raw).map_err(|e| ParseError::MalformedXml {
+                        file: filename.to_owned(),
+                        line,
+                        message: format!("référence d'entité « &{name}; » : {e}"),
+                    })?;
+                match stack.last_mut() {
+                    Some(frame) => frame.text.push_str(&resolved),
+                    None => {
+                        return Err(ParseError::MalformedXml {
+                            file: filename.to_owned(),
+                            line,
+                            message: "référence d'entité hors de tout élément".to_owned(),
+                        });
                     }
                 }
             }

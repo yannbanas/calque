@@ -32,7 +32,7 @@ calque-vendors = { path = "crates/calque-vendors" }
 calque-report = { path = "crates/calque-report" }
 calque-scrub = { path = "crates/calque-scrub" }
 calque-collect = { path = "crates/calque-collect" }
-quick-xml = "0.37"
+quick-xml = "0.41"
 
 ipnet = { version = "2", features = ["serde"] }
 serde = { version = "1", features = ["derive"] }
