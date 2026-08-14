@@ -2897,7 +2897,9 @@ mod tests {
             .expect("règle V80");
         assert_eq!(
             r80.matches.services,
-            vec![ServiceExpr::Service(Service::tcp_dport(PortRange::single(80)))]
+            vec![ServiceExpr::Service(Service::tcp_dport(PortRange::single(
+                80
+            )))]
         );
         let r443 = policy
             .rules
@@ -2906,7 +2908,9 @@ mod tests {
             .expect("règle V443");
         assert_eq!(
             r443.matches.services,
-            vec![ServiceExpr::Service(Service::tcp_dport(PortRange::single(443)))]
+            vec![ServiceExpr::Service(Service::tcp_dport(PortRange::single(
+                443
+            )))]
         );
     }
 
