@@ -7,8 +7,8 @@
 //! `Fidelity::Partial` (§6.3 : ne jamais deviner).
 
 use calque_model::{
-    Action, AddrExpr, AddrObject, AdminState, Device, DnatTarget, Fidelity, IfaceId, Interface,
-    NatAction, NextHop, ObjectId, PolicyId, PortRange, ProtoMatch, RouteOrigin, Service,
+    Action, AddrExpr, AddrObject, AdminState, Device, DnatTarget, ExternalKind, Fidelity, IfaceId,
+    Interface, NatAction, NextHop, ObjectId, PolicyId, PortRange, ProtoMatch, RouteOrigin, Service,
     ServiceExpr, ServiceObject, Severity, VrfId, ZoneId,
 };
 use calque_vendors::fortigate::FortigateAdapter;
@@ -77,28 +77,93 @@ fn fidelite_complete_sur_la_fixture() {
         Fidelity::Complete,
         "la fixture ne contient que des directives gérées"
     );
-    // Quatre constats Info (pas des incompréhensions), dans l'ordre du
-    // fichier : health-check SD-WAN, topologie du tunnel IPsec, politique
-    // 4 désactivée, politique 7 éclatée (une règle par VIP).
+    // Six constats Info (pas des incompréhensions) : health-check SD-WAN,
+    // topologie du tunnel IPsec, les DEUX objets externes (fqdn + géo,
+    // compris mais d'étendue à fournir — pas des lacunes), politique 4
+    // désactivée, politique 7 éclatée (une règle par VIP).
     let infos: Vec<_> = out
         .notes
         .iter()
         .filter(|n| n.severity == Severity::Info)
         .collect();
-    assert_eq!(infos.len(), 4, "{infos:?}");
-    assert!(infos[0].message.contains("health-check SD-WAN `hc-dns`"));
-    assert!(infos[1].message.contains("tunnel IPsec `vpn-site-a`"));
-    assert!(infos[1].message.contains("10.201.0.1"));
-    assert!(infos[1].message.contains("via `wan`"));
-    assert!(infos[2].message.contains("politique 4"));
-    assert!(infos[2].message.contains("désactivée"));
-    assert!(infos[3].message.contains("politique 7 éclatée"));
-    // Aucun avertissement : toutes les références de la fixture se
-    // résolvent.
+    assert_eq!(infos.len(), 6, "{infos:?}");
+    let dit = |motif: &str| infos.iter().any(|n| n.message.contains(motif));
+    assert!(dit("health-check SD-WAN `hc-dns`"));
+    assert!(infos
+        .iter()
+        .any(|n| n.message.contains("tunnel IPsec `vpn-site-a`")
+            && n.message.contains("10.201.0.1")
+            && n.message.contains("via `wan`")));
+    assert!(dit("politique 4") && dit("désactivée"));
+    assert!(dit("politique 7 éclatée"));
+    // Les objets externes : compris (note Info), étendue à fournir.
+    assert!(
+        infos
+            .iter()
+            .any(|n| n.message.contains("fqdn-insights")
+                && n.message.contains("insights.nutanix.com"))
+    );
+    assert!(infos
+        .iter()
+        .any(|n| n.message.contains("geo-fr") && n.message.contains("FR")));
+    // Aucun avertissement : les objets externes ne dégradent PAS la
+    // fidélité (ils sont compris), et toutes les références se résolvent.
     assert!(
         out.notes.iter().all(|n| n.severity == Severity::Info),
         "{:?}",
         out.notes
+    );
+}
+
+/// Les objets `fqdn` et `geography` sont STOCKÉS en `External` (compris,
+/// étendue externe), plus jamais jetés/exclus par « objet manquant ».
+#[test]
+fn objets_externes_fqdn_et_geography() {
+    let dev = import_basic().device;
+    assert_eq!(
+        addr_obj(&dev, "fqdn-insights"),
+        &AddrObject::External {
+            kind: ExternalKind::Fqdn,
+            hint: "insights.nutanix.com".to_owned(),
+        }
+    );
+    assert_eq!(
+        addr_obj(&dev, "geo-fr"),
+        &AddrObject::External {
+            kind: ExternalKind::Geography,
+            hint: "FR".to_owned(),
+        }
+    );
+}
+
+/// Un `type wildcard-fqdn` (et un `type fqdn` dont la valeur porte un `*`)
+/// deviennent un `External` de type WildcardFqdn, résoluble par clé exacte.
+#[test]
+fn objet_wildcard_fqdn_est_externe() {
+    let conf = format!(
+        "{BASIC}config firewall address\n    edit \"wild-explicite\"\n        \
+         set type wildcard-fqdn\n        set wildcard-fqdn \"*.nutanix.com\"\n    next\n    \
+         edit \"wild-implicite\"\n        set type fqdn\n        set fqdn \"*.example.com\"\n    \
+         next\nend\n"
+    );
+    let out = FortigateAdapter
+        .import_str(&conf, FILE)
+        .expect("un modèle doit sortir");
+    // L'objet externe ne dégrade pas la fidélité (il est compris).
+    assert_eq!(out.fidelity, Fidelity::Complete, "{:?}", out.fidelity);
+    assert_eq!(
+        addr_obj(&out.device, "wild-explicite"),
+        &AddrObject::External {
+            kind: ExternalKind::WildcardFqdn,
+            hint: "*.nutanix.com".to_owned(),
+        }
+    );
+    assert_eq!(
+        addr_obj(&out.device, "wild-implicite"),
+        &AddrObject::External {
+            kind: ExternalKind::WildcardFqdn,
+            hint: "*.example.com".to_owned(),
+        }
     );
 }
 
@@ -257,8 +322,9 @@ fn route_par_objet_adresse() {
 #[test]
 fn objets_adresses_et_groupe() {
     let dev = import_basic().device;
-    // 4 objets + 1 groupe + 2 VIP + 1 groupe de VIP.
-    assert_eq!(dev.objects.addresses.len(), 8);
+    // 4 objets + 1 groupe + 2 VIP + 1 groupe de VIP + 2 objets externes
+    // (fqdn + géographie).
+    assert_eq!(dev.objects.addresses.len(), 10);
 
     // Hôte /32.
     match addr_obj(&dev, "h-srv-web") {
@@ -407,7 +473,9 @@ fn politique_ordre_actions_et_spans() {
             "6",
             "7:vip-web-443",
             "7:vip-un-pour-un",
-            "8"
+            "8",
+            // La règle vers l'objet externe fqdn (résolution `--resolve`).
+            "20"
         ]
     );
 

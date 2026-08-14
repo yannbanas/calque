@@ -98,6 +98,16 @@ fn addr_object_set(
         .ok_or_else(|| EvalError::AddrObjectMissing { object: id.clone() })?;
     match obj {
         AddrObject::Nets(nets) => Ok(PrefixSet::from_nets(nets.iter().copied())),
+        // Objet externe non résolu : ensemble d'adresses VIDE, mais SIGNALÉ
+        // (jamais l'ensemble vide silencieux, qui serait confondu avec un
+        // objet légitimement vide et pourrait faire déclarer une règle
+        // morte à tort). L'appelant (dead-rules, reach) transforme cette
+        // erreur en exclusion / part `Unknown` diagnostiquée (§6.3).
+        AddrObject::External { kind, hint } => Err(EvalError::ExternalUnresolved {
+            object: id.clone(),
+            kind: *kind,
+            hint: hint.clone(),
+        }),
         AddrObject::Group(members) => {
             stack.push(id.clone());
             let mut out = PrefixSet::empty();
@@ -262,6 +272,38 @@ mod tests {
         };
         let hs = rule_headerset(&s, &m).expect("résolution");
         assert!(hs.is_empty());
+    }
+
+    #[test]
+    fn objet_externe_non_resolu_est_signale() {
+        use calque_model::ExternalKind;
+        let mut s = ObjectStore::default();
+        s.addresses.insert(
+            ObjectId::new("FQDN"),
+            AddrObject::External {
+                kind: ExternalKind::Fqdn,
+                hint: "insights.example.com".to_owned(),
+            },
+        );
+        let m = RuleMatch {
+            src: Vec::new(),
+            dst: vec![AddrExpr::Object(ObjectId::new("FQDN"))],
+            services: Vec::new(),
+        };
+        // Jamais l'ensemble vide silencieux : une erreur, que reach/dead
+        // transforment en part Unknown / exclusion diagnostiquée.
+        assert!(matches!(
+            rule_headerset(&s, &m),
+            Err(EvalError::ExternalUnresolved { .. })
+        ));
+
+        // Résolu → HeaderSet non vide et analysable.
+        s.addresses.insert(
+            ObjectId::new("FQDN"),
+            AddrObject::Nets(vec![net("203.0.113.0/24")]),
+        );
+        let hs = rule_headerset(&s, &m).expect("résolution");
+        assert!(hs.contains(&tcp("10.0.0.1", "203.0.113.10", 443)));
     }
 
     #[test]

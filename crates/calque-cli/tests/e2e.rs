@@ -140,6 +140,166 @@ fn import_fichier_inconnu_liste_les_scores() {
 }
 
 // ---------------------------------------------------------------------------
+// import --resolve : objets externes (fqdn/geography) fournis par l'humain
+// ---------------------------------------------------------------------------
+
+/// Une configuration minimale dont la SEULE règle vise un objet `fqdn` :
+/// hors ligne son étendue est inconnue, donc le verdict n'est pas ferme.
+const FQDN_CONF: &str = "\
+#config-version=FGT60F-7.0.5-FW-build0304-220328:opmode=0:vdom=0
+config system global
+    set hostname \"fw-fqdn\"
+end
+config system interface
+    edit \"lan\"
+        set vdom \"root\"
+        set ip 10.30.1.1 255.255.255.0
+        set type physical
+        set role lan
+    next
+    edit \"wan\"
+        set vdom \"root\"
+        set ip 192.0.2.2 255.255.255.252
+        set type physical
+        set role wan
+    next
+end
+config router static
+    edit 1
+        set gateway 192.0.2.1
+        set device \"wan\"
+    next
+end
+config firewall address
+    edit \"fqdn-cible\"
+        set type fqdn
+        set fqdn \"insights.example.com\"
+    next
+end
+config firewall policy
+    edit 1
+        set name \"lan-vers-fqdn\"
+        set srcintf \"lan\"
+        set dstintf \"wan\"
+        set srcaddr \"all\"
+        set dstaddr \"fqdn-cible\"
+        set action accept
+        set schedule \"always\"
+        set service \"ALL\"
+    next
+end
+";
+
+const FQDN_RESOLVE: &str = "\
+fqdn:
+  \"insights.example.com\": [203.0.113.0/24]
+";
+
+/// Avant résolution : le chemin qui dépend de l'objet externe est NON FERME
+/// (§6.3, code 3) et le récapitulatif invite à fournir les préfixes. Après
+/// `import --resolve`, le même chemin est tranché FERMEMENT (autorisé).
+#[test]
+fn import_resolve_rend_un_objet_fqdn_analysable() {
+    let tmp = TempDir::new().expect("répertoire temporaire");
+    std::fs::write(tmp.path().join("fqdn.conf"), FQDN_CONF).expect("écriture config");
+
+    // 1. Import SANS résolution.
+    let out = calque(tmp.path(), &["import", "fqdn.conf"]);
+    assert_code(&out, 0);
+    let txt = stdout(&out);
+    // Le récapitulatif des objets externes non résolus (une invitation).
+    assert!(
+        txt.contains("objet(s) externe(s) non résolu(s)"),
+        "récap import : {txt}"
+    );
+    assert!(txt.contains("insights.example.com"), "récap import : {txt}");
+
+    // 2. Le chemin vers un hôte est NON FERME : la règle décisive référence
+    // l'objet externe, dont l'étendue n'est pas fournie.
+    let out = calque(
+        tmp.path(),
+        &["path", "10.30.1.5", "->", "203.0.113.10:443/tcp"],
+    );
+    assert_code(&out, 3);
+    let txt = stdout(&out);
+    assert!(txt.contains("NON FERME"), "path avant résolution : {txt}");
+    assert!(
+        txt.contains("insights.example.com"),
+        "le diagnostic nomme l'objet externe : {txt}"
+    );
+
+    // 3. `model check` liste l'objet externe non résolu.
+    let out = calque(tmp.path(), &["model", "check"]);
+    let txt = stdout(&out);
+    assert!(
+        txt.contains("objet(s) externe(s) non résolu(s)"),
+        "model check : {txt}"
+    );
+
+    // 4. Import AVEC résolution : l'objet est fourni par l'humain.
+    std::fs::write(tmp.path().join("resolve.yaml"), FQDN_RESOLVE).expect("écriture résolution");
+    let out = calque(
+        tmp.path(),
+        &["import", "fqdn.conf", "--resolve", "resolve.yaml"],
+    );
+    assert_code(&out, 0);
+    let txt = stdout(&out);
+    assert!(
+        txt.contains("1 objet(s) résolu(s), 0 restant(s)"),
+        "récap résolution : {txt}"
+    );
+
+    // 5. Le même chemin est désormais tranché FERMEMENT (autorisé, code 0).
+    let out = calque(
+        tmp.path(),
+        &["path", "10.30.1.5", "->", "203.0.113.10:443/tcp"],
+    );
+    assert_code(&out, 0);
+    let txt = stdout(&out);
+    assert!(txt.contains("autorisé"), "path après résolution : {txt}");
+    // Un hôte HORS de l'étendue fournie n'est pas autorisé par cette règle :
+    // la résolution est EXACTE, pas une supposition élargie.
+    let out = calque(tmp.path(), &["path", "10.30.1.5", "->", "8.8.8.8:443/tcp"]);
+    assert_code(&out, 1);
+    assert!(
+        stdout(&out).contains("refusé"),
+        "hors étendue : {}",
+        stdout(&out)
+    );
+}
+
+/// Sur la fixture partagée, `import --resolve` résout les deux objets
+/// externes (fqdn + géographie) fournis par le fichier du corpus.
+#[test]
+fn import_resolve_sur_la_fixture_partagee() {
+    let tmp = TempDir::new().expect("répertoire temporaire");
+    std::fs::write(tmp.path().join("basic.conf"), BASIC).expect("écriture fixture");
+    std::fs::write(
+        tmp.path().join("resolve.yaml"),
+        include_str!("../../../corpus/fortigate/resolve-basic.yaml"),
+    )
+    .expect("écriture résolution");
+    let out = calque(
+        tmp.path(),
+        &["import", "basic.conf", "--resolve", "resolve.yaml"],
+    );
+    assert_code(&out, 0);
+    let txt = stdout(&out);
+    assert!(
+        txt.contains("2 objet(s) résolu(s), 0 restant(s)"),
+        "récap : {txt}"
+    );
+    // Plus aucun objet externe non résolu à signaler.
+    let out = calque(tmp.path(), &["model", "check"]);
+    let txt = stdout(&out);
+    assert!(txt.contains("COMPLÈTE"), "model check : {txt}");
+    assert!(
+        !txt.contains("objet(s) externe(s) non résolu(s)"),
+        "plus d'objet externe non résolu : {txt}"
+    );
+}
+
+// ---------------------------------------------------------------------------
 // path
 // ---------------------------------------------------------------------------
 
@@ -626,9 +786,16 @@ fn dead_rules_fixture_vip_masque() {
         txt.contains("masquée par : la règle 6"),
         "le masque : {txt}"
     );
+    // La règle 20 (dstaddr = objet externe fqdn non résolu) est EXCLUE de
+    // l'analyse (jamais déclarée morte, jamais comptée comme masque) : elle
+    // deviendra analysable une fois résolue via `--resolve`.
     assert!(
-        txt.contains("1 équipement(s) analysé(s), 1 règle(s) morte(s), 0 exclue(s)."),
+        txt.contains("1 équipement(s) analysé(s), 1 règle(s) morte(s), 1 exclue(s)."),
         "sortie : {txt}"
+    );
+    assert!(
+        txt.contains("fqdn-insights"),
+        "l'objet externe est nommé dans les exclusions : {txt}"
     );
 }
 
@@ -665,9 +832,10 @@ fn dead_rules_detecte_une_regle_masquee() {
     assert!(txt.contains("ligne 82"), "la ligne du masque : {txt}");
     assert!(txt.contains("paquet témoin"), "le témoin : {txt}");
     // Deux règles mortes : celle que porte déjà la fixture
-    // (`7:vip-web-443`, voir `dead_rules_fixture_vip_masque`) et la 9.
+    // (`7:vip-web-443`, voir `dead_rules_fixture_vip_masque`) et la 9. La
+    // règle 20 (objet externe fqdn) reste EXCLUE (irrésoluble hors ligne).
     assert!(
-        txt.contains("1 équipement(s) analysé(s), 2 règle(s) morte(s), 0 exclue(s)."),
+        txt.contains("1 équipement(s) analysé(s), 2 règle(s) morte(s), 1 exclue(s)."),
         "sortie : {txt}"
     );
 }

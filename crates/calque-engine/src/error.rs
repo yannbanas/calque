@@ -6,13 +6,23 @@
 
 use std::net::IpAddr;
 
-use calque_model::{Diagnostic, ObjectId, PolicyId, RuleId, SourceSpan};
+use calque_model::{Diagnostic, ExternalKind, ObjectId, PolicyId, RuleId, SourceSpan};
 use ipnet::IpNet;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EvalError {
     /// Objet adresse référencé par une règle mais absent du magasin.
     AddrObjectMissing { object: ObjectId },
+    /// Objet adresse dont l'étendue est EXTERNE (fqdn, géographie…) et non
+    /// résolue : sur le chemin décisif, le moteur ne peut pas trancher
+    /// fermement sans deviner (§6.3). Ce n'est pas une lacune du modèle —
+    /// l'objet est compris —, c'est une invitation à fournir ses préfixes
+    /// via `--resolve`.
+    ExternalUnresolved {
+        object: ObjectId,
+        kind: ExternalKind,
+        hint: String,
+    },
     /// Objet service référencé par une règle mais absent du magasin.
     ServiceObjectMissing { object: ObjectId },
     /// Cycle dans les groupes d'objets ; `path` est le chemin fautif.
@@ -75,6 +85,11 @@ impl std::fmt::Display for EvalError {
             EvalError::AddrObjectMissing { object } => {
                 write!(f, "objet adresse « {object} » introuvable")
             }
+            EvalError::ExternalUnresolved { object, kind, hint } => write!(
+                f,
+                "objet externe « {object} » ({kind} « {hint} ») non résolu : \
+                 fournissez ses préfixes via `--resolve` pour trancher (§6.3 : jamais deviné)"
+            ),
             EvalError::ServiceObjectMissing { object } => {
                 write!(f, "objet service « {object} » introuvable")
             }

@@ -7,18 +7,19 @@
 //! (refusé, non ferme, flux en échec…) d'une erreur d'exécution. Le détail
 //! par commande est documenté dans l'aide (`cli.rs`).
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use calque_engine::{ReachReport, Trace};
 use calque_model::{
     ConcretePacket, DeviceId, Endpoint, Fidelity, IfaceId, Link, LinkOrigin, Network, Severity,
-    ZoneId,
+    UnresolvedExternal, ZoneId,
 };
 use calque_policy::{flow_packet, Expectation, FlowsFile, Proto};
 use calque_report::VerdictView;
 use calque_space::{Cube, HeaderSet, PortRanges, PrefixSet, ProtoSet};
+use ipnet::IpNet;
 use miette::{miette, Context, IntoDiagnostic};
 
 use crate::backend;
@@ -66,7 +67,14 @@ pub fn run(cli: Cli) -> miette::Result<ExitCode> {
 
 fn import(root: &Path, args: ImportArgs) -> miette::Result<()> {
     let mut project = project::load_or_default(root)?;
+    // Les correspondances externes, chargées AVANT l'import (une erreur de
+    // fichier ne doit pas laisser un projet à moitié importé).
+    let resolutions = match &args.resolve {
+        Some(path) => Some(load_resolutions(path)?),
+        None => None,
+    };
     let mut imported = 0usize;
+    let mut imported_ids: Vec<DeviceId> = Vec::new();
 
     if let Some(dir) = &args.dir {
         let entries = std::fs::read_dir(dir)
@@ -82,12 +90,35 @@ fn import(root: &Path, args: ImportArgs) -> miette::Result<()> {
             return Err(miette!("aucun fichier à importer dans {}", dir.display()));
         }
         for file in files {
-            add_import(&mut project, &file, None)?;
+            imported_ids.push(add_import(&mut project, &file, None)?);
             imported += 1;
         }
     } else if let Some(file) = &args.file {
-        add_import(&mut project, file, args.name.as_deref())?;
+        imported_ids.push(add_import(&mut project, file, args.name.as_deref())?);
         imported = 1;
+    }
+
+    // Résolution des objets externes AVANT la sauvegarde : `.calque/model.json`
+    // stocke le résultat résolu. Ne touche QUE les équipements importés à
+    // cet appel (les autres gardent leur état).
+    if let Some(resolutions) = &resolutions {
+        let mut resolved = 0usize;
+        let mut remaining = 0usize;
+        for id in &imported_ids {
+            if let Some(device) = project.network.devices.get_mut(id) {
+                let bilan = calque_model::resolve_external(device, resolutions);
+                resolved += bilan.resolved;
+                remaining += bilan.unresolved.len();
+            }
+        }
+        println!(
+            "Résolution externe : {resolved} objet(s) résolu(s), {remaining} restant(s) non \
+             résolu(s) (fournis par {}).",
+            args.resolve
+                .as_deref()
+                .map(|p| p.display().to_string())
+                .unwrap_or_default()
+        );
     }
 
     project::save(root, &project)?;
@@ -98,7 +129,70 @@ fn import(root: &Path, args: ImportArgs) -> miette::Result<()> {
     if !project.fidelity.is_complete() {
         println!("Attention : le modèle est PARTIEL — lancez `calque model check` pour le détail.");
     }
+    print_external_summary(&project);
     Ok(())
+}
+
+/// Le fichier `--resolve` : deux sections optionnelles `fqdn:` et
+/// `geography:`, chacune associant un nom (la valeur-repère de l'objet) à
+/// une liste de préfixes. La désérialisation est TYPÉE et fermée
+/// (`deny_unknown_fields`) — rien n'est deviné.
+#[derive(Debug, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ResolveFile {
+    #[serde(default)]
+    fqdn: BTreeMap<String, Vec<IpNet>>,
+    #[serde(default)]
+    geography: BTreeMap<String, Vec<IpNet>>,
+}
+
+/// Charge et fusionne le fichier `--resolve` en une table `hint → préfixes`
+/// (les clés `fqdn` et `geography` sont toutes des valeurs-repère d'objets
+/// externes). La lecture vit dans le CLI (le cœur reste pur) et passe par
+/// la borne de taille YAML (audit R1).
+fn load_resolutions(path: &Path) -> miette::Result<BTreeMap<String, Vec<IpNet>>> {
+    let raw = backend::read_bounded(path, backend::MAX_YAML_BYTES, "un fichier de résolution")?;
+    let file: ResolveFile = serde_yaml::from_str(&raw).map_err(|e| {
+        miette!(
+            help = "format attendu : `fqdn:` et/ou `geography:`, chacune associant un nom à une \
+                    liste de préfixes CIDR, ex. `fqdn:\\n  \"a.example.com\": [52.10.0.0/16]`",
+            "{} est invalide : {e}",
+            path.display()
+        )
+    })?;
+    let mut map: BTreeMap<String, Vec<IpNet>> = BTreeMap::new();
+    for (name, nets) in file.fqdn.into_iter().chain(file.geography) {
+        map.insert(name, nets);
+    }
+    Ok(map)
+}
+
+/// Les objets externes non résolus de tout le modèle, par équipement.
+fn collect_unresolved_externals(project: &Project) -> Vec<(DeviceId, UnresolvedExternal)> {
+    let mut out = Vec::new();
+    for device in project.network.devices.values() {
+        for ext in calque_model::unresolved_externals(device) {
+            out.push((device.id.clone(), ext));
+        }
+    }
+    out
+}
+
+/// Récapitulatif des objets externes NON résolus — une invitation, pas une
+/// erreur (§6.3) : « fournissez leurs préfixes via `--resolve` ».
+fn print_external_summary(project: &Project) {
+    let externals = collect_unresolved_externals(project);
+    if externals.is_empty() {
+        return;
+    }
+    println!(
+        "\n{} objet(s) externe(s) non résolu(s) — fournissez leurs préfixes via `--resolve` \
+         pour les inclure dans l'analyse :",
+        externals.len()
+    );
+    for (device, ext) in &externals {
+        println!("  - {} ({}) [équipement « {device} »]", ext.hint, ext.kind);
+    }
 }
 
 /// Importe un fichier dans le projet et rend l'identifiant de
@@ -158,10 +252,10 @@ fn model_check(root: &Path) -> miette::Result<ExitCode> {
         project.network.links.len()
     );
 
-    match &project.fidelity {
+    let code = match &project.fidelity {
         Fidelity::Complete => {
             println!("Fidélité : COMPLÈTE — toutes les directives ont été comprises.");
-            Ok(ExitCode::SUCCESS)
+            ExitCode::SUCCESS
         }
         Fidelity::Partial { unsupported } => {
             println!(
@@ -175,13 +269,17 @@ fn model_check(root: &Path) -> miette::Result<ExitCode> {
                 "\nL'outil refusera un verdict ferme sur tout chemin touché par ces directives."
             );
             let has_errors = unsupported.iter().any(|d| d.severity == Severity::Error);
-            Ok(if has_errors {
+            if has_errors {
                 ExitCode::from(1)
             } else {
                 ExitCode::SUCCESS
-            })
+            }
         }
-    }
+    };
+    // Les objets externes non résolus : une invitation à fournir leurs
+    // préfixes, distincte de la fidélité (l'objet EST compris, §6.3).
+    print_external_summary(&project);
+    Ok(code)
 }
 
 /// Affiche un diagnostic joliment via miette : si le fichier d'origine est
@@ -669,10 +767,31 @@ fn deciding_rule(trace: &calque_report::TraceView) -> Option<String> {
 // ---------------------------------------------------------------------------
 
 fn plan(root: &Path, args: PlanArgs) -> miette::Result<ExitCode> {
-    let project = project::load(root)?;
+    let mut project = project::load(root)?;
+
+    // Correspondances externes appliquées DES DEUX CÔTÉS : le modèle
+    // courant ET la candidate, pour une comparaison cohérente (§6.3 : les
+    // mêmes préfixes fournis, jamais devinés).
+    let resolutions = match &args.resolve {
+        Some(path) => Some(load_resolutions(path)?),
+        None => None,
+    };
+    if let Some(resolutions) = &resolutions {
+        for device in project.network.devices.values_mut() {
+            calque_model::resolve_external(device, resolutions);
+        }
+    }
 
     // 1. Import de la candidate, avec les mêmes adaptateurs que `import`.
-    let candidate = backend::import_config(&args.candidate, None)?;
+    let mut candidate = backend::import_config(&args.candidate, None)?;
+    if let Some(resolutions) = &resolutions {
+        let bilan = calque_model::resolve_external(&mut candidate.device, resolutions);
+        println!(
+            "Résolution externe (candidate) : {} objet(s) résolu(s), {} restant(s).",
+            bilan.resolved,
+            bilan.unresolved.len()
+        );
+    }
     println!(
         "candidate : {} ({}) → équipement « {} »",
         args.candidate.display(),

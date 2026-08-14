@@ -662,6 +662,10 @@ fn addr_object_nets(
     }
     match store.addresses.get(id) {
         None => {} // objet manquant : pas de sonde, le moteur diagnostiquera
+        // Objet externe non résolu (fqdn/géographie) : étendue inconnue
+        // hors ligne, aucune sonde concrète — le moteur le signalera sur le
+        // chemin décisif (jamais deviné, §6.3).
+        Some(AddrObject::External { .. }) => {}
         Some(AddrObject::Nets(nets)) => {
             for net in nets {
                 if out.len() >= MAX_ADDRS_PER_SIDE {

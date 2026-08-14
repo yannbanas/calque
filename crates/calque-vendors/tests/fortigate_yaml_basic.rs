@@ -88,19 +88,22 @@ fn fidelite_complete_sur_la_fixture_yaml() {
         Fidelity::Complete,
         "la fixture YAML ne contient que des directives gérées"
     );
-    // Les mêmes quatre notes Info que via le CLI : health-check SD-WAN,
-    // topologie du tunnel IPsec, politique 4 désactivée, politique 7
-    // éclatée.
+    // Les mêmes six notes Info que via le CLI : health-check SD-WAN,
+    // topologie du tunnel IPsec, les deux objets externes (fqdn + géo),
+    // politique 4 désactivée, politique 7 éclatée.
     let infos: Vec<_> = out
         .notes
         .iter()
         .filter(|n| n.severity == Severity::Info)
         .collect();
-    assert_eq!(infos.len(), 4, "{infos:?}");
-    assert!(infos[0].message.contains("health-check SD-WAN"));
-    assert!(infos[1].message.contains("tunnel IPsec `vpn-site-a`"));
-    assert!(infos[2].message.contains("politique 4"));
-    assert!(infos[3].message.contains("politique 7 éclatée"));
+    assert_eq!(infos.len(), 6, "{infos:?}");
+    let dit = |motif: &str| infos.iter().any(|n| n.message.contains(motif));
+    assert!(dit("health-check SD-WAN"));
+    assert!(dit("tunnel IPsec `vpn-site-a`"));
+    assert!(dit("politique 4"));
+    assert!(dit("politique 7 éclatée"));
+    assert!(dit("fqdn-insights") && dit("insights.nutanix.com"));
+    assert!(dit("geo-fr") && dit("FR"));
 }
 
 /// LE test clé : même équipement, quel que soit le format d'entrée.

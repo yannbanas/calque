@@ -190,3 +190,20 @@ firewall_policy:
         action: accept
         schedule: "always"
         service: "ALL"
+firewall_address:
+    - fqdn-insights:
+        type: fqdn
+        fqdn: "insights.nutanix.com"
+    - geo-fr:
+        type: geography
+        country: "FR"
+firewall_policy:
+    - 20:
+        name: "lan-vers-insights"
+        srcintf: "lan"
+        dstintf: "wan"
+        srcaddr: "all"
+        dstaddr: "fqdn-insights"
+        action: accept
+        schedule: "always"
+        service: "ALL"

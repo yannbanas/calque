@@ -70,6 +70,17 @@ pub struct ImportArgs {
     /// Nom à donner à l'équipement (par défaut : le nom du fichier)
     #[arg(long = "as", value_name = "NOM", conflicts_with = "dir")]
     pub name: Option<String>,
+
+    /// Fichier de correspondances noms d'objets externes → préfixes IP,
+    /// FOURNI par l'humain (§6.3 : Calque ne devine jamais). Résout les
+    /// objets fqdn/wildcard-fqdn/geography irrésolubles hors ligne. Format
+    /// YAML : deux sections `fqdn:` et `geography:`, chacune associant un
+    /// nom (le domaine ou le code pays) à une liste de préfixes CIDR. Les
+    /// wildcard-fqdn sont résolus par correspondance EXACTE de clé (pas de
+    /// glob) — fournissez la clé telle quelle (ex. `"*.example.com"`). Ce
+    /// qui n'y figure pas reste non résolu.
+    #[arg(long, value_name = "FICHIER")]
+    pub resolve: Option<PathBuf>,
 }
 
 #[derive(Debug, Subcommand)]
@@ -258,6 +269,14 @@ pub struct PlanArgs {
     /// seules les ouvertures nouvelles sont recherchées)
     #[arg(long, value_name = "FICHIER", default_value = "flows.yaml")]
     pub flows: PathBuf,
+
+    /// Fichier de correspondances objets externes → préfixes (même format
+    /// que `calque import --resolve`), appliqué DES DEUX CÔTÉS (modèle
+    /// courant et candidate) pour une comparaison cohérente. Sans lui, les
+    /// objets fqdn/geography non résolus du projet importé sont réutilisés
+    /// tels quels.
+    #[arg(long, value_name = "FICHIER")]
+    pub resolve: Option<PathBuf>,
 }
 
 #[derive(Debug, clap::Args)]

@@ -12,10 +12,10 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::net::{IpAddr, Ipv4Addr};
 
 use calque_model::{
-    Action, AddrExpr, AddrObject, AdminState, Device, DeviceId, Diagnostic, DnatTarget, Fidelity,
-    IfaceId, Interface, NatAction, NextHop, ObjectId, Policy, PolicyId, PortRange, ProtoMatch,
-    Route, RouteOrigin, Rule, RuleId, RuleMatch, Service, ServiceExpr, ServiceObject, Severity,
-    SourceSpan, Vendor, VrfId, ZoneId,
+    Action, AddrExpr, AddrObject, AdminState, Device, DeviceId, Diagnostic, DnatTarget,
+    ExternalKind, Fidelity, IfaceId, Interface, NatAction, NextHop, ObjectId, Policy, PolicyId,
+    PortRange, ProtoMatch, Route, RouteOrigin, Rule, RuleId, RuleMatch, Service, ServiceExpr,
+    ServiceObject, Severity, SourceSpan, Vendor, VrfId, ZoneId,
 };
 
 use super::values;
@@ -760,6 +760,12 @@ impl Converter {
                         go(store, m.as_str(), visited, nets, unresolved);
                     }
                 }
+                // Objet externe (fqdn/géographie) : son étendue en préfixes
+                // n'est pas connue à l'import (la résolution `--resolve`
+                // s'applique plus tard, sur le modèle). Une route qui le
+                // référence reste donc irrésoluble ici — diagnostiquée par
+                // l'appelant, jamais devinée.
+                Some(AddrObject::External { .. }) => unresolved.push(name.to_owned()),
                 None => unresolved.push(name.to_owned()),
             }
         }
@@ -1594,6 +1600,13 @@ impl Converter {
             let mut subnet: Option<ipnet::IpNet> = None;
             let mut start_ip: Option<Ipv4Addr> = None;
             let mut end_ip: Option<Ipv4Addr> = None;
+            // Objet dont l'étendue est EXTERNE (fqdn/wildcard/géographie) :
+            // le type et sa valeur-repère (« hint ») sont compris, seule
+            // l'étendue en préfixes est inconnue hors ligne (§6.3).
+            let mut external_kind: Option<ExternalKind> = None;
+            let mut fqdn_value: Option<String> = None;
+            let mut wildcard_value: Option<String> = None;
+            let mut country_value: Option<String> = None;
             let mut broken = false;
 
             for d in &edit.children {
@@ -1631,8 +1644,13 @@ impl Converter {
                         // sinon il se déduit des adresses de l'interface —
                         // déjà dans le modèle, rien n'est deviné.
                         Some("interface-subnet") => is_iface_subnet = true,
-                        // fqdn, geography, wildcard… : irrésolubles hors
-                        // ligne, on ne devine pas.
+                        // fqdn, wildcard-fqdn, geography : étendue INCONNUE
+                        // hors ligne. On ne devine pas, mais on ne jette
+                        // plus l'objet : il est COMPRIS et stocké en
+                        // `External` (résoluble via `--resolve`).
+                        Some("fqdn") => external_kind = Some(ExternalKind::Fqdn),
+                        Some("wildcard-fqdn") => external_kind = Some(ExternalKind::WildcardFqdn),
+                        Some("geography") => external_kind = Some(ExternalKind::Geography),
                         other => {
                             self.unsupported(
                                 format!(
@@ -1666,6 +1684,12 @@ impl Converter {
                     },
                     // L'interface de référence d'un objet interface-subnet.
                     Some("interface") => iface_ref = d.arg(1).map(str::to_owned),
+                    // Valeurs-repère des objets externes : le nom de domaine
+                    // (fqdn/wildcard) ou le code pays (geography). Ce sont
+                    // les clés à fournir dans le fichier `--resolve`.
+                    Some("fqdn") => fqdn_value = d.arg(1).map(str::to_owned),
+                    Some("wildcard-fqdn") => wildcard_value = d.arg(1).map(str::to_owned),
+                    Some("country") => country_value = d.arg(1).map(str::to_owned),
                     // Reconnus, sans effet sur l'accessibilité.
                     Some(
                         "comment" | "color" | "uuid" | "associated-interface" | "allow-routing",
@@ -1683,7 +1707,43 @@ impl Converter {
             if broken {
                 continue; // diagnostiqué ; un objet à moitié compris ne rentre pas.
             }
-            let object = if is_range {
+            let object = if let Some(kind) = external_kind {
+                // Objet externe : la valeur-repère selon le type.
+                let raw_hint = match kind {
+                    ExternalKind::Fqdn | ExternalKind::WildcardFqdn => {
+                        fqdn_value.clone().or_else(|| wildcard_value.clone())
+                    }
+                    ExternalKind::Geography => country_value.clone(),
+                };
+                let Some(hint) = raw_hint else {
+                    self.unsupported(
+                        format!(
+                            "objet adresse `{name}` de type {kind} sans valeur-repère \
+                             (`set fqdn`/`set wildcard-fqdn`/`set country`)"
+                        ),
+                        &edit.span,
+                    );
+                    continue;
+                };
+                // Un `type fqdn` dont la valeur porte un `*` est en fait un
+                // motif : on le classe en wildcard (correspondance de clé
+                // EXACTE à la résolution, jamais de glob).
+                let kind = match kind {
+                    ExternalKind::Fqdn if hint.starts_with('*') => ExternalKind::WildcardFqdn,
+                    k => k,
+                };
+                // Note Info (pas Warning) : l'objet EST compris, ce n'est
+                // pas une lacune de fidélité — juste une étendue à fournir.
+                self.note_info(
+                    format!(
+                        "objet adresse `{name}` de type {kind} : étendue externe (« {hint} ») \
+                         non résolue hors ligne — fournissez ses préfixes via `--resolve` pour \
+                         l'inclure dans l'analyse"
+                    ),
+                    &edit.span,
+                );
+                AddrObject::External { kind, hint }
+            } else if is_range {
                 match (start_ip, end_ip) {
                     (Some(s), Some(e)) => {
                         // Une plage devient une liste EXACTE de préfixes
@@ -2186,22 +2246,28 @@ impl Converter {
                     continue; // filtré ci-dessus, jamais atteint.
                 };
                 // `set protocol`/`set extport` du VIP contraignent le
-                // service de la règle. Un service explicite ne peut pas
-                // être intersecté avec cette contrainte dans le modèle :
-                // diagnostic, jamais une approximation silencieuse.
+                // service de la règle : le trafic ne matche que s'il vise
+                // le port externe du VIP. La contrainte réelle est donc
+                // `service ∩ port_du_VIP`. On la calcule quand c'est
+                // représentable (service Any, ou objets service résolus en
+                // services concrets), sinon on diagnostique.
                 let rule_services = match &vip.service {
                     Some(svc) if is_any_services(&services) => vec![ServiceExpr::Service(*svc)],
-                    Some(_) => {
-                        self.unsupported(
-                            format!(
-                                "politique {num} : service explicite combiné à la redirection \
-                                 de ports du VIP `{vip_name}` — intersection non représentable, \
-                                 la restriction de port du VIP n'est pas appliquée"
-                            ),
-                            &span,
-                        );
-                        services.clone()
-                    }
+                    Some(svc) => match self.intersect_services_with_vip(&services, *svc) {
+                        Some(inter) => inter,
+                        None => {
+                            self.unsupported(
+                                format!(
+                                    "politique {num} : service explicite combiné à la redirection \
+                                     de ports du VIP `{vip_name}` — intersection non \
+                                     représentable, la restriction de port du VIP n'est pas \
+                                     appliquée"
+                                ),
+                                &span,
+                            );
+                            services.clone()
+                        }
+                    },
                     None => services.clone(),
                 };
                 rules.push(Rule {
@@ -2377,6 +2443,83 @@ impl Converter {
 /// contrainte).
 fn is_any_services(services: &[ServiceExpr]) -> bool {
     matches!(services, [] | [ServiceExpr::Any])
+}
+
+impl Converter {
+    /// `service ∩ port_du_VIP` : le trafic d'une règle référençant un VIP
+    /// ne matche que s'il vise le port externe du VIP. On résout chaque
+    /// expression de service en services concrets (via l'`ObjectStore`,
+    /// déjà peuplé — les blocs service sont traités avant les politiques),
+    /// on intersecte chacun avec la contrainte du VIP, et on garde les
+    /// intersections non vides.
+    ///
+    /// Rend `None` (→ diagnostic, jamais d'approximation) dès qu'une
+    /// expression n'est pas résoluble en services concrets : `Any`
+    /// résiduel, objet service manquant ou groupe cyclique. Cela ÉVITE le
+    /// faux positif de `dead-rules` où deux règles éclatées d'un même VIP
+    /// (ports différents) se masqueraient faute de contrainte de port.
+    fn intersect_services_with_vip(
+        &self,
+        services: &[ServiceExpr],
+        vip: Service,
+    ) -> Option<Vec<ServiceExpr>> {
+        let mut out = Vec::new();
+        for expr in services {
+            let concretes = match expr {
+                ServiceExpr::Service(s) => vec![*s],
+                ServiceExpr::Object(id) => {
+                    let mut acc = Vec::new();
+                    self.flatten_service_object(id, &mut Vec::new(), &mut acc)?;
+                    acc
+                }
+                ServiceExpr::Any => return None,
+            };
+            for c in concretes {
+                if let Some(inter) = c.intersect(vip) {
+                    out.push(ServiceExpr::Service(inter));
+                }
+            }
+        }
+        // Intersection VIDE (service explicite et port du VIP disjoints) :
+        // la règle ne matche RIEN. On ne peut PAS le représenter par un
+        // vecteur vide — la convention de `RuleMatch` fait qu'un vecteur
+        // vide vaut `Any` (tout), l'exact contraire. Faute de « service
+        // impossible » dans le modèle, on rend `None` : l'appelant garde le
+        // service d'origine (sur-approximation) ET diagnostique — honnête,
+        // jamais un faux « autorisé » silencieux.
+        if out.is_empty() {
+            return None;
+        }
+        Some(out)
+    }
+
+    /// Aplatit un objet service en services concrets, groupes imbriqués
+    /// compris. `None` si l'objet est absent ou si un cycle est détecté
+    /// (l'intersection n'est alors pas représentable).
+    fn flatten_service_object(
+        &self,
+        id: &ObjectId,
+        stack: &mut Vec<ObjectId>,
+        out: &mut Vec<Service>,
+    ) -> Option<()> {
+        if stack.contains(id) {
+            return None; // cycle : non représentable.
+        }
+        match self.device.objects.services.get(id)? {
+            ServiceObject::Services(list) => {
+                out.extend(list.iter().copied());
+                Some(())
+            }
+            ServiceObject::Group(members) => {
+                stack.push(id.clone());
+                for m in members {
+                    self.flatten_service_object(m, stack, out)?;
+                }
+                stack.pop();
+                Some(())
+            }
+        }
+    }
 }
 
 fn is_policy_block(node: &ConfigNode) -> bool {
@@ -2722,6 +2865,49 @@ mod tests {
         assert!(unsupported
             .iter()
             .any(|d| d.message.contains("intersection non représentable")));
+    }
+
+    /// Deux VIP sur la MÊME adresse externe, ports différents (80 et 443),
+    /// dans une règle au service explicite [HTTP, HTTPS] : le découpage
+    /// applique `service ∩ port_du_VIP` à chaque moitié, si bien qu'elles
+    /// ne se masquent PAS (sinon `dead-rules` déclarerait la seconde morte
+    /// à tort). Reproduit le cas réel HDVAIRS.
+    #[test]
+    fn vip_multiple_meme_extip_ports_disjoints_intersecte_le_service() {
+        let out = import(
+            "config firewall service custom\n    edit \"HTTP\"\n        \
+             set tcp-portrange 80\n    next\n    edit \"HTTPS\"\n        \
+             set tcp-portrange 443\n    next\nend\n\
+             config firewall vip\n    edit \"V80\"\n        set extip 192.0.2.10\n        \
+             set portforward enable\n        set mappedip \"10.0.0.10\"\n        \
+             set extport 80\n        set mappedport 80\n    next\n    edit \"V443\"\n        \
+             set extip 192.0.2.10\n        set portforward enable\n        \
+             set mappedip \"10.0.0.10\"\n        set extport 443\n        \
+             set mappedport 443\n    next\nend\n\
+             config firewall policy\n    edit 1\n        set dstaddr \"V80\" \"V443\"\n        \
+             set action accept\n        set service \"HTTP\" \"HTTPS\"\n    next\nend\n",
+        );
+        assert_eq!(out.fidelity, Fidelity::Complete, "{:?}", out.fidelity);
+        let policy = &out.device.policies[&PolicyId::new(FORWARD_POLICY)];
+        // Deux règles éclatées, chacune contrainte à SON port.
+        let r80 = policy
+            .rules
+            .iter()
+            .find(|r| r.id.as_str() == "1:V80")
+            .expect("règle V80");
+        assert_eq!(
+            r80.matches.services,
+            vec![ServiceExpr::Service(Service::tcp_dport(PortRange::single(80)))]
+        );
+        let r443 = policy
+            .rules
+            .iter()
+            .find(|r| r.id.as_str() == "1:V443")
+            .expect("règle V443");
+        assert_eq!(
+            r443.matches.services,
+            vec![ServiceExpr::Service(Service::tcp_dport(PortRange::single(443)))]
+        );
     }
 
     /// Un REFUS vers un VIP ne traduit rien (le DNAT n'est porté que par

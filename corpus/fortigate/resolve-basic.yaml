@@ -1,0 +1,11 @@
+# Correspondances noms d'objets externes → préfixes IP, FOURNIES par
+# l'humain (§6.3 : Calque ne devine jamais ; ce qui n'est pas ici reste
+# non résolu). Les clés sont les valeurs-repère (« hint ») des objets :
+# le nom de domaine pour fqdn/wildcard-fqdn, le code pays pour geography.
+#
+# Fixture de test : préfixes fictifs, à ne pas prendre pour la réalité.
+fqdn:
+  "insights.nutanix.com": [52.10.0.0/16, 52.20.0.0/16]
+  "*.nutanix.com": [52.0.0.0/8]
+geography:
+  "FR": [2.0.0.0/8, 5.135.0.0/16]

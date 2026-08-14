@@ -99,6 +99,17 @@ fn addr_object_contains(
         .ok_or_else(|| EvalError::AddrObjectMissing { object: id.clone() })?;
     match obj {
         AddrObject::Nets(nets) => Ok(nets.iter().any(|n| n.contains(ip))),
+        // Objet externe non résolu : il ne matche AUCUN paquet (ensemble
+        // vide), mais on ne l'ignore pas en silence — on le SIGNALE, pour
+        // que le verdict soit non ferme quand l'objet est sur le chemin
+        // décisif (§6.3). L'évaluation ordonnée court-circuite les autres
+        // dimensions d'abord : cette erreur ne remonte donc que quand
+        // l'étendue de l'objet aurait pu changer la décision.
+        AddrObject::External { kind, hint } => Err(EvalError::ExternalUnresolved {
+            object: id.clone(),
+            kind: *kind,
+            hint: hint.clone(),
+        }),
         AddrObject::Group(members) => {
             stack.push(id.clone());
             for member in members {
@@ -289,6 +300,35 @@ mod tests {
             addr_expr_contains(&s, &expr, &ip),
             Err(EvalError::AddrObjectMissing { .. })
         ));
+    }
+
+    #[test]
+    fn objet_externe_non_resolu_est_signale_puis_resolu() {
+        use calque_model::ExternalKind;
+        let mut s = ObjectStore::default();
+        s.addresses.insert(
+            ObjectId::new("FQDN"),
+            AddrObject::External {
+                kind: ExternalKind::Fqdn,
+                hint: "insights.example.com".to_owned(),
+            },
+        );
+        let ip: IpAddr = "203.0.113.10".parse().expect("ip");
+        let expr = AddrExpr::Object(ObjectId::new("FQDN"));
+        // Non résolu : ni « matche » ni « ne matche pas » — un signalement,
+        // pour que le verdict soit non ferme (§6.3).
+        assert!(matches!(
+            addr_expr_contains(&s, &expr, &ip),
+            Err(EvalError::ExternalUnresolved { .. })
+        ));
+
+        // Une fois résolu en préfixes (comme le ferait `resolve_external`),
+        // l'objet est pleinement analysable : verdict ferme.
+        s.addresses.insert(
+            ObjectId::new("FQDN"),
+            AddrObject::Nets(vec!["203.0.113.0/24".parse().expect("net")]),
+        );
+        assert_eq!(addr_expr_contains(&s, &expr, &ip), Ok(true));
     }
 
     #[test]
