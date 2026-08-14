@@ -270,6 +270,18 @@ impl Converter {
             ["system", "sdwan"] => self.sdwan_block(node),
             ["vpn", "ipsec", "phase1-interface"] => self.phase1_block(node),
             ["vpn", "ipsec", "phase2-interface"] => self.phase2_block(node),
+            // Blocs sans AUCUN effet sur l'accessibilité (« qui joint quoi ») :
+            // messages de remplacement HTML, réglages d'administration/GUI,
+            // journalisation, supervision… Ce n'est pas « deviner » (§6.3) :
+            // ces blocs sont RECONNUS et classés hors périmètre du modèle de
+            // filtrage/routage. Note Info, la fidélité n'est pas dégradée.
+            _ if is_cosmetic_block(&path) => self.note_info(
+                format!(
+                    "bloc `config {}` reconnu, sans effet sur l'accessibilité (hors modèle)",
+                    node.args.join(" ")
+                ),
+                &node.span,
+            ),
             _ => self.unsupported(
                 format!("bloc `config {}` non géré", node.args.join(" ")),
                 &node.span,
@@ -306,6 +318,32 @@ impl Converter {
                         self.device.id = DeviceId::new(name);
                     }
                 }
+                // Réglages GLOBAUX sans effet sur l'accessibilité :
+                // administration, GUI, ports d'admin, fuseau, contrôleur de
+                // switch, hôte de gestion… Préfixes `admin-`/`gui-` et liste
+                // explicite. Une clé VRAIMENT inconnue reste signalée (on ne
+                // devine pas qu'un futur réglage global est sans effet).
+                ("set", Some(k))
+                    if k.starts_with("admin-")
+                        || k.starts_with("gui-")
+                        || matches!(
+                            k,
+                            "alias"
+                                | "timezone"
+                                | "switch-controller"
+                                | "virtual-switch-vlan"
+                                | "hostname"
+                                | "language"
+                                | "gui-theme"
+                                | "management-vdom"
+                                | "pre-login-banner"
+                                | "post-login-banner"
+                                | "revision-backup-on-logout"
+                                | "daylight-saving-time"
+                                | "gui-certificates"
+                                | "cfg-save"
+                                | "timezone-offset"
+                        ) => {}
                 // Message tronqué à dessein : une directive non comprise
                 // peut porter un secret — sa VALEUR ne va jamais dans un
                 // diagnostic (§11.4), le span suffit à retrouver la ligne.
@@ -395,7 +433,20 @@ impl Converter {
                             &d.span,
                         ),
                     },
-                    // Reconnus, sans effet sur l'accessibilité.
+                    // Le VRF de l'interface (cloisonnement de routage) EST
+                    // modélisé : le moteur route par VRF.
+                    Some("vrf") => {
+                        if let Some(v) = d.arg(1) {
+                            iface.vrf = VrfId::new(v);
+                        }
+                    }
+                    // L'interface parente d'un VLAN (`set interface "lan"`) :
+                    // le VLAN a sa propre adresse et sa propre zone, la
+                    // parenté ne change pas « qui joint quoi » — reconnue,
+                    // sans effet sur l'accessibilité.
+                    Some("interface") => {}
+                    // Reconnus, sans effet sur l'accessibilité : administration,
+                    // supervision, débit, découverte de voisinage, métadonnées.
                     Some(
                         "vdom"
                         | "allowaccess"
@@ -403,7 +454,41 @@ impl Converter {
                         | "description"
                         | "role"
                         | "snmp-index"
-                        | "device-identification",
+                        | "device-identification"
+                        | "estimated-upstream-bandwidth"
+                        | "estimated-downstream-bandwidth"
+                        | "measured-upstream-bandwidth"
+                        | "measured-downstream-bandwidth"
+                        | "monitor-bandwidth"
+                        | "bandwidth-measure-time"
+                        | "speed"
+                        | "mtu"
+                        | "mtu-override"
+                        | "lldp-transmission"
+                        | "lldp-reception"
+                        | "ip-managed-by-fortiipam"
+                        | "src-check"
+                        | "stp"
+                        | "fortilink"
+                        | "arpforward"
+                        | "broadcast-forward"
+                        | "l2forward"
+                        | "netbios-forward"
+                        | "detectserver"
+                        | "detectprotocol"
+                        | "fail-detect"
+                        | "external"
+                        | "dedicated-to"
+                        | "trust-ip-1"
+                        | "trust-ip-2"
+                        | "trust-ip-3"
+                        | "color"
+                        | "status-report-mode"
+                        | "sflow-sampler"
+                        | "netflow-sampler"
+                        | "secondary-IP"
+                        | "preserve-session-route"
+                        | "weight",
                     ) => {}
                     other => self.unsupported(
                         format!(
@@ -562,6 +647,23 @@ impl Converter {
                     Some("blackhole") => blackhole = d.arg(1) == Some("enable"),
                     Some("status") => disabled = d.arg(1) == Some("disable"),
                     Some("comment") => {}
+                    // VRF de la route : `0` est le VRF racine (défaut), où
+                    // vont déjà toutes les routes du modèle — sans effet.
+                    // Un VRF non nul est un cloisonnement de routage que le
+                    // modèle ne porte pas encore PAR ROUTE : on le signale.
+                    Some("vrf") => {
+                        if !matches!(d.arg(1), Some("0") | None) {
+                            self.unsupported(
+                                format!(
+                                    "route {seq} : `set vrf {}` — routage par VRF non-défaut \
+                                     non encore modélisé par route",
+                                    d.arg(1).unwrap_or("")
+                                ),
+                                &d.span,
+                            );
+                        }
+                    }
+                    Some(k) if is_cosmetic_key(k) => {}
                     other => self.unsupported(
                         format!("`set {}` non géré sur la route {seq}", other.unwrap_or("")),
                         &d.span,
@@ -1336,10 +1438,41 @@ impl Converter {
                     // filtrage. La VALEUR de psksecret est un secret :
                     // elle ne sort jamais dans un diagnostic.
                     Some(
-                        "psksecret" | "proposal" | "dhgrp" | "ike-version" | "keylife"
-                        | "nattraversal" | "dpd" | "dpd-retrycount" | "dpd-retryinterval"
-                        | "peertype" | "comments",
+                        "psksecret"
+                        | "proposal"
+                        | "dhgrp"
+                        | "ike-version"
+                        | "keylife"
+                        | "nattraversal"
+                        | "dpd"
+                        | "dpd-retrycount"
+                        | "dpd-retryinterval"
+                        | "peertype"
+                        | "comments"
+                        | "net-device"
+                        | "mode-cfg"
+                        | "mode"
+                        | "add-route"
+                        | "exchange-interface-ip"
+                        | "wizard-type"
+                        | "role"
+                        | "xauthtype"
+                        | "authusrgrp"
+                        | "save-password"
+                        | "idle-timeout"
+                        | "idle-timeoutinterval"
+                        | "ipv4-dns-server1"
+                        | "ipv4-dns-server2"
+                        | "ipv4-dns-server3"
+                        | "ipv4-split-include"
+                        | "ipv4-start-ip"
+                        | "ipv4-end-ip"
+                        | "ipv4-netmask"
+                        | "dns-mode"
+                        | "localid"
+                        | "localid-type",
                     ) => {}
+                    Some(k) if is_cosmetic_key(k) => {}
                     other => self.unsupported(
                         format!(
                             "`set {}` non géré dans le tunnel IPsec `{name}`",
@@ -1452,8 +1585,14 @@ impl Converter {
                     // sélecteurs.
                     Some(
                         "proposal" | "pfs" | "dhgrp" | "keylifeseconds" | "keylife-type"
-                        | "auto-negotiate" | "keepalive" | "replay" | "comments",
+                        | "auto-negotiate" | "keepalive" | "replay" | "comments"
+                        // `src-addr-type`/`dst-addr-type` disent SEULEMENT
+                        // sous quelle forme le sélecteur est donné (nom ou
+                        // sous-réseau) — la VALEUR est déjà captée par
+                        // src-name/dst-name/src-subnet/dst-subnet.
+                        | "src-addr-type" | "dst-addr-type" | "encapsulation",
                     ) => {}
+                    Some(k) if is_cosmetic_key(k) => {}
                     other => self.unsupported(
                         format!(
                             "`set {}` non géré dans le sélecteur phase2 `{name}`",
@@ -1691,9 +1830,8 @@ impl Converter {
                     Some("wildcard-fqdn") => wildcard_value = d.arg(1).map(str::to_owned),
                     Some("country") => country_value = d.arg(1).map(str::to_owned),
                     // Reconnus, sans effet sur l'accessibilité.
-                    Some(
-                        "comment" | "color" | "uuid" | "associated-interface" | "allow-routing",
-                    ) => {}
+                    Some("associated-interface" | "allow-routing") => {}
+                    Some(k) if is_cosmetic_key(k) => {}
                     other => self.unsupported(
                         format!(
                             "`set {}` non géré dans l'objet adresse `{name}`",
@@ -1826,7 +1964,7 @@ impl Converter {
                     ("set", Some("member")) => {
                         members = d.args[1..].iter().map(ObjectId::new).collect();
                     }
-                    ("set", Some("comment" | "color" | "uuid")) => {}
+                    ("set", Some(k)) if is_cosmetic_key(k) => {}
                     _ => self.unsupported(
                         format!(
                             "`{}` non géré dans le groupe d'adresses `{name}`",
@@ -1934,7 +2072,7 @@ impl Converter {
                         );
                         broken = true;
                     }
-                    Some("comment" | "color" | "category" | "visibility") => {}
+                    Some(k) if is_cosmetic_key(k) => {}
                     other => self.unsupported(
                         format!(
                             "`set {}` non géré dans le service `{name}`",
@@ -2022,7 +2160,7 @@ impl Converter {
                     ("set", Some("member")) => {
                         members = d.args[1..].iter().map(ObjectId::new).collect();
                     }
-                    ("set", Some("comment" | "color")) => {}
+                    ("set", Some(k)) if is_cosmetic_key(k) => {}
                     _ => self.unsupported(
                         format!(
                             "`{}` non géré dans le groupe de services `{name}`",
@@ -2112,8 +2250,66 @@ impl Converter {
                             );
                         }
                     }
-                    // Reconnus, sans effet sur l'accessibilité.
-                    Some("name" | "uuid" | "comments" | "logtraffic" | "logtraffic-start") => {}
+                    // Reconnus, sans effet sur la DÉCISION autoriser/refuser.
+                    // Les profils UTM (antivirus, filtrage web, IPS, SSL…)
+                    // inspectent le trafic DÉJÀ AUTORISÉ ; ils ne changent
+                    // pas « qui peut joindre quoi ». `port-preserve` est un
+                    // détail de traduction de port source. Reconnus, sans
+                    // effet sur l'accessibilité de premier niveau.
+                    Some(
+                        "name"
+                        | "logtraffic"
+                        | "logtraffic-start"
+                        | "utm-status"
+                        | "inspection-mode"
+                        | "ssl-ssh-profile"
+                        | "av-profile"
+                        | "webfilter-profile"
+                        | "dnsfilter-profile"
+                        | "emailfilter-profile"
+                        | "dlp-profile"
+                        | "dlp-sensor"
+                        | "file-filter-profile"
+                        | "ips-sensor"
+                        | "application-list"
+                        | "voip-profile"
+                        | "icap-profile"
+                        | "waf-profile"
+                        | "ssh-filter-profile"
+                        | "profile-protocol-options"
+                        | "profile-type"
+                        | "profile-group"
+                        | "av-quarantine"
+                        | "scan-botnet-connections"
+                        | "port-preserve"
+                        | "auto-asic-offload"
+                        | "np-acceleration"
+                        | "fixedport"
+                        | "block-notification"
+                        | "replacemsg-override-group"
+                        | "traffic-shaper"
+                        | "traffic-shaper-reverse"
+                        | "per-ip-shaper"
+                        | "capture-packet"
+                        | "wanopt"
+                        | "webcache"
+                        | "session-ttl"
+                        | "schedule-timeout"
+                        | "anti-replay"
+                        | "tcp-mss-sender"
+                        | "tcp-mss-receiver"
+                        | "label"
+                        | "global-label",
+                    ) => {}
+                    // ATTENTION — ces clés CHANGENT le périmètre de la règle
+                    // et NE doivent PAS être avalées en silence (ce serait
+                    // sur-approximer → risque de faux « autorisé », §6.3) :
+                    // `groups`/`users`/`fsso-groups` restreignent aux
+                    // identités authentifiées ; `internet-service*` remplace
+                    // les adresses par des jeux d'IP prédéfinis ; `*-negate`
+                    // INVERSE la correspondance ; `nat46/64` change
+                    // l'adressage. Elles restent diagnostiquées (Partial).
+                    Some(k) if is_cosmetic_key(k) => {}
                     other => self.unsupported(
                         format!(
                             "`set {}` non géré dans la politique {num}",
@@ -2445,6 +2641,123 @@ fn is_any_services(services: &[ServiceExpr]) -> bool {
     matches!(services, [] | [ServiceExpr::Any])
 }
 
+/// Une clé `set …` qui est de la MÉTADONNÉE pure dans n'importe quel
+/// contexte d'objet : identifiants internes, commentaires, couleur,
+/// état FortiManager, redondances de type déjà captées ailleurs. Aucune
+/// ne peut changer un verdict d'accessibilité. Reconnue, sans effet —
+/// note Info, jamais une lacune de fidélité (§6.3 : classer n'est pas
+/// deviner ; seule une clé qui POURRAIT peser sur le filtrage reste en
+/// `unsupported`).
+fn is_cosmetic_key(key: &str) -> bool {
+    matches!(
+        key,
+        "uuid"
+            | "comment"
+            | "comments"
+            | "color"
+            | "dirty"
+            | "sub-type"
+            | "obj-type"
+            | "visibility"
+            | "global-object"
+            | "category"
+    )
+}
+
+/// Un bloc de premier niveau `config …` sans AUCUN effet possible sur
+/// l'accessibilité (filtrage, NAT, routage, interfaces, objets). Reconnu
+/// et classé hors modèle : note Info, pas une lacune de fidélité.
+///
+/// Ce n'est pas « deviner » (§6.3) : rien de ces blocs ne peut changer un
+/// verdict « qui peut joindre quoi » — ce sont des messages de
+/// remplacement, de l'administration, du GUI, de la journalisation, de la
+/// supervision, du contrôleur WiFi/switch, etc. La liste est explicite et
+/// prudente : au moindre doute sur un bloc touchant le trafic, il RESTE en
+/// `unsupported` (Warning + Partial).
+fn is_cosmetic_block(path: &[&str]) -> bool {
+    match path {
+        // Messages de remplacement (HTML/texte affichés à l'utilisateur).
+        ["system", "replacemsg", ..] | ["system", "replacemsg-image", ..] => true,
+        // Administration, GUI, supervision, journalisation — aucun filtrage.
+        ["system", "admin"]
+        | ["system", "accprofile"]
+        | ["system", "sso-admin"]
+        | ["system", "api-user"]
+        | ["system", "snmp", ..]
+        | ["system", "npu"]
+        | ["system", "console"]
+        | ["system", "ntp"]
+        | ["system", "dns"]
+        | ["system", "dns-database"]
+        | ["system", "ddns"]
+        | ["system", "fortiguard"]
+        | ["system", "fortimanager", ..]
+        | ["system", "central-management"]
+        | ["system", "auto-install"]
+        | ["system", "automation-trigger" | "automation-action" | "automation-stitch"]
+        | ["system", "settings"]
+        | ["system", "session-helper" | "session-ttl"]
+        | ["system", "standalone-cluster"]
+        | ["system", "ha"]
+        | ["system", "email-server"]
+        | ["system", "custom-language"]
+        | ["system", "object-tagging"]
+        | ["system", "sdn-connector"]
+        | ["system", "saml"]
+        | ["system", "vdom", ..]
+        | ["system", "gre-tunnel"]
+        | ["system", "physical-switch"]
+        | ["system", "virtual-switch"]
+        | ["system", "sso-fortigate-cloud-admin"]
+        | ["system", "sso-forticloud-admin"]
+        | ["system", "autoupdate", ..]
+        | ["system", "ftm-push"]
+        | ["system", "federated-upgrade"]
+        | ["system", "ike"]
+        | ["system", "dhcp", ..]
+        | ["system", "fortiguard-log"]
+        | ["system", "fortisandbox"]
+        | ["system", "geoip-override"]
+        | ["system", "speed-test-schedule"]
+        | ["system", "vne-tunnel"]
+        | ["log", ..]
+        | ["user", ..]
+        | ["switch-controller", ..]
+        | ["wireless-controller", ..]
+        | ["endpoint-control", ..]
+        | ["vpn", "certificate", ..]
+        | ["vpn", "ssl", ..]
+        | ["certificate", ..] => true,
+        // Profils de sécurité (inspection de contenu) : ils modulent le
+        // trafic AUTORISÉ (antivirus, filtrage web…) mais ne changent pas
+        // la décision d'accessibilité de premier niveau. Hors modèle.
+        ["antivirus", ..]
+        | ["webfilter", ..]
+        | ["dnsfilter", ..]
+        | ["application", ..]
+        | ["ips", ..]
+        | ["emailfilter", ..]
+        | ["dlp", ..]
+        | ["file-filter", ..]
+        | ["ssh-filter", ..]
+        | ["icap", ..]
+        | ["waf", ..]
+        | ["casb", ..]
+        | ["virtual-patch", ..]
+        | ["videofilter", ..]
+        | ["firewall", "profile-protocol-options" | "ssl-ssh-profile"]
+        | ["firewall", "shaper", ..]
+        | ["firewall", "schedule", ..]
+        | ["firewall", "internet-service-name" | "internet-service-definition"]
+        | ["firewall", "on-demand-sniffer"]
+        | ["firewall", "proxy-address" | "proxy-addrgrp"]
+        | ["web-proxy", ..]
+        | ["router", "rip" | "ripng" | "ospf" | "ospf6" | "bgp" | "isis" | "multicast"]
+        | ["firewall", "ssh", ..] => true,
+        _ => false,
+    }
+}
+
 impl Converter {
     /// `service ∩ port_du_VIP` : le trafic d'une règle référençant un VIP
     /// ne matche que s'il vise le port externe du VIP. On résout chaque
@@ -2560,6 +2873,53 @@ mod tests {
         assert_eq!(file_stem("fw-01"), "fw-01");
         assert_eq!(file_stem(".conf"), ".conf");
         assert_eq!(file_stem(""), "equipement");
+    }
+
+    /// Un bloc sans effet sur l'accessibilité (messages de remplacement,
+    /// profil de sécurité, administration…) ne dégrade PAS la fidélité :
+    /// il est reconnu (note Info), pas compté comme lacune. Sinon toute
+    /// configuration réelle serait `Partial` et aucun verdict ne serait
+    /// ferme.
+    #[test]
+    fn les_blocs_cosmetiques_ne_degradent_pas_la_fidelite() {
+        // Deux interfaces pour un modèle minimal viable, plus des blocs
+        // purement cosmétiques.
+        let out = super::super::FortigateAdapter
+            .import_str(
+                "config system global\n    set hostname fw-t\n    \
+                 set admin-sport 4443\n    set gui-theme blue\nend\n\
+                 config system replacemsg http url-block\n    set buffer \"<html>…</html>\"\nend\n\
+                 config log memory setting\n    set status enable\nend\n\
+                 config antivirus profile\n    edit \"default\"\n    next\nend\n",
+                "t.conf",
+            )
+            .expect("modèle");
+        assert_eq!(out.fidelity, Fidelity::Complete, "{:?}", out.fidelity);
+        // Les blocs cosmétiques sont bien reconnus (notes Info).
+        assert!(out.notes.iter().any(|n| n.message.contains("replacemsg")
+            || n.message.contains("antivirus")
+            || n.message.contains("log memory")));
+    }
+
+    /// À l'inverse, une clé qui CHANGE le périmètre d'une règle
+    /// (restriction par identité, négation, internet-service) reste
+    /// diagnostiquée : l'avaler en silence sur-approximerait la règle et
+    /// pourrait produire un faux « autorisé » (§6.3).
+    #[test]
+    fn les_cles_qui_changent_le_perimetre_restent_signalees() {
+        let out = import(
+            "config firewall policy\n    edit 1\n        set srcintf \"lan\"\n        \
+             set dstintf \"wan\"\n        set srcaddr \"all\"\n        \
+             set dstaddr \"all\"\n        set action accept\n        \
+             set groups \"employes\"\n        set dstaddr-negate enable\n    next\nend\n",
+        );
+        let Fidelity::Partial { unsupported } = &out.fidelity else {
+            panic!("une restriction par identité/négation doit dégrader la fidélité");
+        };
+        assert!(unsupported.iter().any(|d| d.message.contains("groups")));
+        assert!(unsupported
+            .iter()
+            .any(|d| d.message.contains("dstaddr-negate")));
     }
 
     fn import(raw: &str) -> AdapterOutput {

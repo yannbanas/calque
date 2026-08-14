@@ -7,6 +7,24 @@ majeur.
 
 ## [Unreleased]
 
+### Modifié
+
+- **Fidélité : le bruit cosmétique ne dégrade plus le modèle.** Les
+  directives sans effet possible sur l'accessibilité (identifiants `uuid`,
+  messages de remplacement, profils de sécurité UTM attachés aux
+  politiques, réglages d'administration/GUI, options de débit/supervision
+  d'interface, redondances déjà captées comme `src-addr-type`…) sont
+  désormais RECONNUES et classées hors modèle (note Info), au lieu d'être
+  comptées comme « non comprises ». Sur une configuration de collectivité
+  réelle, les diagnostics passent de ~540 à ~45 — tous légitimes — et
+  `model check` redevient lisible et actionnable. Ce n'est pas « deviner »
+  (§6.3) : la liste est explicite et prudente ; toute clé qui POURRAIT
+  peser sur le filtrage (restriction par identité `groups`/`users`,
+  `internet-service`, négation `*-negate`, `nat46/64`, VRF non-défaut par
+  route…) reste diagnostiquée, jamais avalée en silence.
+- Le VRF d'une interface (`set vrf`) est modélisé (cloisonnement de
+  routage) ; `set vrf 0` sur une route est le VRF racine (sans effet).
+
 ### Ajouté
 
 - **Modélisation FortiGate étendue** — `firewall vip`/`vipgrp` (objets
