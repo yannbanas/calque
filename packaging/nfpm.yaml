@@ -1,0 +1,34 @@
+# Configuration nfpm : produit les paquets .deb ET .rpm de Calque à partir
+# d'une seule description déclarative. Calque est un binaire unique en
+# lecture seule (pas de démon, pas de service systemd) — le paquet se
+# limite au binaire dans /usr/bin et à la documentation.
+#
+# Les variables ${PKG_VERSION}, ${PKG_ARCH} et ${BIN_PATH} sont fournies
+# par le workflow de release (une seule source de vérité : le tag et la
+# matrice de cibles).
+name: calque
+arch: ${PKG_ARCH}
+platform: linux
+version: ${PKG_VERSION}
+section: net
+priority: optional
+maintainer: "Yann Banas <yannbanas@gmail.com>"
+vendor: "Yann Banas"
+homepage: "https://github.com/yannbanas/calque"
+license: "Apache-2.0"
+description: |
+  Analyse hors ligne de configurations reseau : qui peut joindre quoi, et
+  qu'est-ce qui casse si j'applique ce changement. Lecture seule, toujours.
+  Importe FortiGate (CLI et export YAML), Cisco IOS, OPNsense/pfSense et
+  nftables ; repond par une trace justifiee regle par regle.
+contents:
+  - src: ${BIN_PATH}
+    dst: /usr/bin/calque
+    file_info:
+      mode: 0755
+  - src: ./LICENSE
+    dst: /usr/share/doc/calque/LICENSE
+  - src: ./README.md
+    dst: /usr/share/doc/calque/README.md
+  - src: ./CHANGELOG.md
+    dst: /usr/share/doc/calque/CHANGELOG.md

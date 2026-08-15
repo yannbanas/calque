@@ -92,9 +92,97 @@ jobs:
           path: dist/*
           if-no-files-found: error
 
+  # Paquets Linux .deb + .rpm (amd64 et arm64), produits par nfpm depuis
+  # `packaging/nfpm.yaml`. Le binaire est lié à la glibc (cibles gnu), la
+  # convention des paquets de distribution.
+  paquets-linux:
+    name: paquets Linux (${{ matrix.arch }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            target: x86_64-unknown-linux-gnu
+          - arch: arm64
+            target: aarch64-unknown-linux-gnu
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: pkg-${{ matrix.target }}
+
+      # Édition de liens croisée pour arm64.
+      - name: Chaîne croisée arm64
+        if: matrix.arch == 'arm64'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu
+          echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc" >> "$GITHUB_ENV"
+
+      - name: Construire
+        run: cargo build --release --locked -p calque-cli --target ${{ matrix.target }}
+
+      - name: Installer nfpm
+        run: |
+          set -euo pipefail
+          echo 'deb [trusted=yes] https://repo.goreleaser.com/apt/ /' \
+            | sudo tee /etc/apt/sources.list.d/goreleaser.list
+          sudo apt-get update
+          sudo apt-get install -y nfpm
+
+      - name: Paquets .deb + .rpm (empreintes SHA-256)
+        shell: bash
+        run: |
+          set -euo pipefail
+          export PKG_VERSION="${GITHUB_REF_NAME#v}"
+          export PKG_ARCH="${{ matrix.arch }}"
+          export BIN_PATH="target/${{ matrix.target }}/release/calque"
+          mkdir -p dist
+          nfpm package -f packaging/nfpm.yaml -p deb -t dist/
+          nfpm package -f packaging/nfpm.yaml -p rpm -t dist/
+          cd dist
+          for f in *.deb *.rpm; do
+            sha256sum "$f" > "${f}.sha256"
+          done
+          ls -l
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: dist-paquets-${{ matrix.arch }}
+          path: dist/*
+          if-no-files-found: error
+
+  # Nomenclature logicielle (SBOM) au format SPDX, pour la traçabilité de
+  # la chaîne d'approvisionnement.
+  sbom:
+    name: SBOM (SPDX)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Installer syft
+        uses: anchore/sbom-action/download-syft@v0
+      - name: Générer la nomenclature SPDX
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#v}"
+          mkdir -p dist
+          syft . -o spdx-json > "dist/calque-${version}.spdx.json"
+          sha256sum "dist/calque-${version}.spdx.json" > "dist/calque-${version}.spdx.json.sha256"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: dist-sbom
+          path: dist/*
+          if-no-files-found: error
+
   release:
     name: publier la release
-    needs: build
+    needs: [build, paquets-linux, sbom]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -140,6 +228,8 @@ jobs:
           body_path: notes.md
           files: |
             dist/calque-*
+            dist/*.deb
+            dist/*.rpm
             dist/SHA256SUMS
           draft: false
           prerelease: ${{ contains(github.ref_name, '-') }}
