@@ -10,7 +10,7 @@ use calque_model::{
 };
 
 use crate::error::EvalError;
-use crate::resolve::packet_matches_rule;
+use crate::resolve::packet_matches_rule_opts;
 use crate::trace::{Decision, Outcome, Stage};
 
 /// Où le filtre est évalué dans la séquence de traitement, avec les zones
@@ -65,6 +65,64 @@ pub struct PolicyEvaluation {
     pub result: FilterResult,
 }
 
+/// Une contrainte de ZONE exclut-elle la règle pour ce paquet ? Les zones
+/// (`from`/`to`) ne sont JAMAIS sur-approximées par le convertisseur : c'est
+/// donc la seule exclusion FIABLE d'une règle sur-approximée, dont le pavé
+/// (adresses/services), lui, n'est pas fiable. En entrée, la zone de sortie
+/// n'est pas encore connue : une contrainte `to` ne peut pas exclure.
+fn zone_excludes(rule: &Rule, point: &FilterPoint) -> bool {
+    if let Some(from) = &rule.from {
+        if point.in_zone() != Some(from) {
+            return true;
+        }
+    }
+    if let FilterPoint::Egress { out_zone, .. } = point {
+        if let Some(to) = &rule.to {
+            if out_zone.as_ref() != Some(to) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// Une règle SUR-APPROXIMÉE atteinte à ce point de l'évaluation ordonnée
+/// (aucune règle antérieure pleinement modélisée n'a tranché) peut décider
+/// ce paquet EN RÉALITÉ, alors que le modèle ne le refléterait pas
+/// fidèlement :
+/// - sur-approximation MONOTONE (identité, `internet-service`, planification)
+///   : si elle matche dans le modèle et devient décisive (accept), l'équipement
+///   réel pourrait ne PAS matcher → la vraie décision serait plus loin →
+///   risque de faux « autorisé » ;
+/// - NÉGATION : le modèle matche le COMPLÉMENT de la réalité ; « ne matche
+///   pas dans le modèle » ne garantit donc pas « ne matche pas en vrai », la
+///   règle pourrait court-circuiter la vraie décision.
+///
+/// La seule exclusion fiable étant la zone (jamais approximée), on refuse de
+/// trancher fermement dès qu'une règle approximée NON exclue par zone est
+/// atteinte avant (ou à) la décision. `allow_partial` (`--allow-partial`)
+/// lève ce refus : la règle est alors évaluée sur sa correspondance modèle,
+/// verdict assumé sur la partie modélisée. On préfère `Unknown` de trop à un
+/// ferme à tort (§6.3).
+fn approximation_blocks(
+    rule: &Rule,
+    point: &FilterPoint,
+    allow_partial: bool,
+) -> Option<EvalError> {
+    if allow_partial {
+        return None;
+    }
+    let reason = rule.approximation.as_ref()?;
+    if zone_excludes(rule, point) {
+        return None;
+    }
+    Some(EvalError::ApproximatedRuleOnPath {
+        rule: rule.id.clone(),
+        source: rule.source.clone(),
+        reason: reason.clone(),
+    })
+}
+
 /// La règle s'applique-t-elle au paquet à ce point du pipeline
 /// (zones + pavé, objets résolus tardivement) ?
 fn rule_applies(
@@ -72,6 +130,7 @@ fn rule_applies(
     rule: &Rule,
     pkt: &ConcretePacket,
     point: &FilterPoint,
+    allow_partial: bool,
 ) -> Result<bool, EvalError> {
     // Zone d'entrée : connue aux deux points.
     if let Some(from) = &rule.from {
@@ -86,10 +145,11 @@ fn rule_applies(
                     return Ok(false);
                 }
             }
-            packet_matches_rule(&device.objects, &rule.matches, pkt)
+            packet_matches_rule_opts(&device.objects, &rule.matches, pkt, allow_partial)
         }
         FilterPoint::Ingress { .. } => {
-            let matched = packet_matches_rule(&device.objects, &rule.matches, pkt)?;
+            let matched =
+                packet_matches_rule_opts(&device.objects, &rule.matches, pkt, allow_partial)?;
             // Ne jamais deviner : si la règle toucherait le paquet mais
             // dépend de la zone de sortie, on refuse de conclure.
             if matched && rule.to.is_some() {
@@ -132,6 +192,7 @@ fn terminal_result(rule: Option<&Rule>, action: &Action) -> Option<FilterResult>
 /// Évalue une politique cible d'un saut (récursif, avec détection de cycle).
 /// Rend `None` si aucune règle terminale ne correspond : l'appelant reprend
 /// alors à la règle suivante (sémantique des chaînes nftables).
+#[allow(clippy::too_many_arguments)]
 fn jump_eval(
     device: &Device,
     policy: &Policy,
@@ -140,6 +201,7 @@ fn jump_eval(
     stage: Stage,
     stack: &mut Vec<calque_model::PolicyId>,
     decisions: &mut Vec<Decision>,
+    allow_partial: bool,
 ) -> Result<Option<FilterResult>, EvalError> {
     if stack.contains(&policy.id) {
         let mut path = stack.clone();
@@ -147,11 +209,21 @@ fn jump_eval(
         return Err(EvalError::JumpCycle { path });
     }
     stack.push(policy.id.clone());
-    let result = jump_eval_inner(device, policy, pkt, point, stage, stack, decisions);
+    let result = jump_eval_inner(
+        device,
+        policy,
+        pkt,
+        point,
+        stage,
+        stack,
+        decisions,
+        allow_partial,
+    );
     stack.pop();
     result
 }
 
+#[allow(clippy::too_many_arguments)]
 fn jump_eval_inner(
     device: &Device,
     policy: &Policy,
@@ -160,9 +232,15 @@ fn jump_eval_inner(
     stage: Stage,
     stack: &mut Vec<calque_model::PolicyId>,
     decisions: &mut Vec<Decision>,
+    allow_partial: bool,
 ) -> Result<Option<FilterResult>, EvalError> {
     for rule in &policy.rules {
-        if !rule_applies(device, rule, pkt, point)? {
+        // Règle sur-approximée atteinte avant toute décision (voir
+        // `approximation_blocks`) : verdict non ferme.
+        if let Some(e) = approximation_blocks(rule, point, allow_partial) {
+            return Err(e);
+        }
+        if !rule_applies(device, rule, pkt, point, allow_partial)? {
             continue;
         }
         match &rule.action {
@@ -174,7 +252,16 @@ fn jump_eval_inner(
                         policy: pid.clone(),
                     })?;
                 let mut sub = Vec::new();
-                if let Some(res) = jump_eval(device, target, pkt, point, stage, stack, &mut sub)? {
+                if let Some(res) = jump_eval(
+                    device,
+                    target,
+                    pkt,
+                    point,
+                    stage,
+                    stack,
+                    &mut sub,
+                    allow_partial,
+                )? {
                     decisions.push(rule_decision(stage, rule, Outcome::Matched));
                     decisions.extend(sub);
                     return Ok(Some(res));
@@ -201,6 +288,11 @@ fn jump_eval_inner(
 ///
 /// Première correspondance gagne ; les règles postérieures qui correspondent
 /// aussi reçoivent une décision `Matched` avec `shadowed_by` rempli.
+///
+/// Équivaut à [`evaluate_policy_opts`] avec `allow_partial = false` : une
+/// règle sur-approximée sur le chemin rend `EvalError::ApproximatedRuleOnPath`
+/// (verdict non ferme), un objet externe non résolu rend
+/// `EvalError::ExternalUnresolved`.
 pub fn evaluate_policy(
     device: &Device,
     policy: &Policy,
@@ -208,13 +300,36 @@ pub fn evaluate_policy(
     point: &FilterPoint,
     stage: Stage,
 ) -> Result<PolicyEvaluation, EvalError> {
+    evaluate_policy_opts(device, policy, pkt, point, stage, false)
+}
+
+/// Comme [`evaluate_policy`], mais `allow_partial` (drapeau
+/// `--allow-partial`) force l'évaluation sur la partie MODÉLISÉE : les règles
+/// sur-approximées sont traitées sur leur correspondance modèle (sans
+/// `Unknown`) et les objets externes non résolus comptent comme « ne matchent
+/// pas ». Verdict assumé, à n'utiliser que sciemment (§6.3).
+pub fn evaluate_policy_opts(
+    device: &Device,
+    policy: &Policy,
+    pkt: &ConcretePacket,
+    point: &FilterPoint,
+    stage: Stage,
+    allow_partial: bool,
+) -> Result<PolicyEvaluation, EvalError> {
     let mut decisions = Vec::new();
     let mut diagnostics = Vec::new();
     let mut jump_stack = vec![policy.id.clone()];
     let mut terminal: Option<(usize, FilterResult)> = None;
 
     for (idx, rule) in policy.rules.iter().enumerate() {
-        if !rule_applies(device, rule, pkt, point)? {
+        // Règle sur-approximée atteinte alors qu'aucune règle antérieure
+        // pleinement modélisée n'a tranché (sinon on aurait déjà rompu la
+        // boucle) : elle est AVANT ou À la décision et peut la changer en
+        // réalité → verdict non ferme (voir `approximation_blocks`).
+        if let Some(e) = approximation_blocks(rule, point, allow_partial) {
+            return Err(e);
+        }
+        if !rule_applies(device, rule, pkt, point, allow_partial)? {
             continue;
         }
         match &rule.action {
@@ -226,9 +341,16 @@ pub fn evaluate_policy(
                         policy: pid.clone(),
                     })?;
                 let mut sub = Vec::new();
-                if let Some(res) =
-                    jump_eval(device, target, pkt, point, stage, &mut jump_stack, &mut sub)?
-                {
+                if let Some(res) = jump_eval(
+                    device,
+                    target,
+                    pkt,
+                    point,
+                    stage,
+                    &mut jump_stack,
+                    &mut sub,
+                    allow_partial,
+                )? {
                     decisions.push(rule_decision(stage, rule, Outcome::Matched));
                     decisions.extend(sub);
                     terminal = Some((idx, res));
@@ -257,7 +379,7 @@ pub fn evaluate_policy(
             // Règles postérieures également couvrantes → masquées.
             let mut priors: Vec<RuleId> = vec![policy.rules[idx].id.clone()];
             for later in &policy.rules[idx + 1..] {
-                match rule_applies(device, later, pkt, point) {
+                match rule_applies(device, later, pkt, point, allow_partial) {
                     Ok(true) => {
                         decisions.push(Decision {
                             stage,
@@ -316,6 +438,7 @@ pub fn evaluate_policy(
                         stage,
                         &mut jump_stack,
                         &mut decisions,
+                        allow_partial,
                     )? {
                         Some(res) => res,
                         None => {
@@ -375,6 +498,7 @@ mod tests {
             to: None,
             action,
             source: SourceSpan::new("test.conf", line),
+            approximation: None,
         }
     }
 

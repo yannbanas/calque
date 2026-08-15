@@ -8,15 +8,19 @@
 //! consommateur en bibliothèque (Constat) fournit ses configurations
 //! historiques.
 //!
-//! Propriété d'honnêteté (§6.3), intacte ici : un chemin qui traverse un
-//! équipement à l'import PARTIEL ne rend jamais de verdict ferme — le
-//! flux est compté en échec avec la raison, jamais deviné.
+//! Propriété d'honnêteté (§6.3), intacte ici : c'est le MOTEUR qui décide de
+//! la fermeté du verdict. Un chemin dont la décision dépend d'une lacune de
+//! modélisation SUR le chemin (règle sur-approximée, objet externe non
+//! résolu, cycle, ECMP divergent…) rend `Verdict::Unknown` → le flux est
+//! compté en échec avec la raison précise, jamais deviné. Une lacune HORS du
+//! chemin décisif ne dégrade plus le verdict (c'était trop conservateur : un
+//! flux bien modélisé était déclaré non ferme à cause d'une directive sans
+//! rapport ailleurs dans la configuration).
 
-use std::collections::BTreeMap;
 use std::net::IpAddr;
 
 use calque_engine::Trace;
-use calque_model::{ConcretePacket, DeviceId, Fidelity, Network, ZoneId};
+use calque_model::{ConcretePacket, Network, ZoneId};
 use serde::{Deserialize, Serialize};
 
 use crate::{EndpointSpec, FlowSpec, PortSpec};
@@ -192,30 +196,8 @@ pub fn flow_packet(
 }
 
 // ---------------------------------------------------------------------------
-// §6.3 — fidélité partielle sur le chemin
+// Justification du verdict
 // ---------------------------------------------------------------------------
-
-/// Les équipements traversés par la trace dont l'import est partiel, avec
-/// leur nombre de directives non comprises : un verdict qui les traverse
-/// n'est pas ferme (§6.3). `fidelity` associe chaque équipement à la
-/// fidélité de son import ; un équipement absent de la table est réputé
-/// complet.
-pub fn partial_devices_on_path(
-    trace: &Trace,
-    fidelity: &BTreeMap<DeviceId, Fidelity>,
-) -> Vec<(DeviceId, usize)> {
-    let mut seen = std::collections::BTreeSet::new();
-    let mut out = Vec::new();
-    for hop in &trace.hops {
-        if !seen.insert(hop.device.clone()) {
-            continue;
-        }
-        if let Some(Fidelity::Partial { unsupported }) = fidelity.get(&hop.device) {
-            out.push((hop.device.clone(), unsupported.len()));
-        }
-    }
-    out
-}
 
 /// La justification du verdict : la dernière décision portée par une règle
 /// (ou au moins par une origine de configuration), libellée comme dans les
@@ -255,17 +237,18 @@ fn deciding_rule(trace: &Trace) -> Option<String> {
 ///   modèle déjà préparé ne change rien). Un modèle non préparé ne produit
 ///   jamais un verdict faux — le moteur refuse honnêtement (`Unknown`)
 ///   d'évaluer une contrainte de zone de sortie au point d'entrée.
-/// - `fidelity` : la fidélité d'import de chaque équipement (§6.3) ; un
-///   équipement absent de la table est réputé complet. Un chemin qui
-///   traverse un équipement partiel est compté en échec avec la raison —
-///   c'est la propriété d'honnêteté du projet, elle ne se contourne pas.
+/// - `allow_partial` : `false` (défaut de `calque test`) rend NON FERME
+///   (`Unknown`, compté en échec) tout flux dont la décision dépend d'une
+///   lacune SUR le chemin — règle sur-approximée (`groups`, `internet-service`,
+///   négation…) ou objet externe non résolu ; une lacune HORS du chemin
+///   décisif n'a plus aucun effet. `true` (drapeau `--allow-partial`) force
+///   le verdict sur la seule partie modélisée — assumé (§6.3).
 ///
 /// # Exemple — le chemin bibliothèque complet
 ///
 /// Du texte de configuration au verdict, sans toucher au disque :
 ///
 /// ```
-/// use std::collections::BTreeMap;
 /// use calque_engine::{infer_links_from_subnets, prepare_for_engine};
 /// use calque_model::Network;
 /// use calque_policy::{evaluate_flow, Expectation, FlowSpec, FlowStatus};
@@ -311,10 +294,6 @@ fn deciding_rule(trace: &Trace) -> Option<String> {
 ///
 /// // 3. Le modèle : équipements + topologie inférée + préparation moteur.
 /// let mut network = Network::default();
-/// let fidelity = BTreeMap::from([(
-///     imported.output.device.id.clone(),
-///     imported.output.fidelity.clone(),
-/// )]);
 /// network
 ///     .devices
 ///     .insert(imported.output.device.id.clone(), imported.output.device);
@@ -330,15 +309,11 @@ fn deciding_rule(trace: &Trace) -> Option<String> {
 ///     port: "443/tcp".parse().expect("port valide"),
 ///     expect: Expectation::Allow,
 /// };
-/// let result = evaluate_flow(&network, &flow, &fidelity);
+/// let result = evaluate_flow(&network, &flow, false);
 /// assert_eq!(result.status, FlowStatus::Ok);
 /// assert_eq!(result.actual.as_deref(), Some("allow"));
 /// ```
-pub fn evaluate_flow(
-    network: &Network,
-    spec: &FlowSpec,
-    fidelity: &BTreeMap<DeviceId, Fidelity>,
-) -> FlowResult {
+pub fn evaluate_flow(network: &Network, spec: &FlowSpec, allow_partial: bool) -> FlowResult {
     let broken = |actual: Option<String>, detail: String| FlowResult {
         name: spec.name.clone(),
         flow: spec.flow_label(),
@@ -358,25 +333,12 @@ pub fn evaluate_flow(
             )
         }
     };
-    let trace = calque_engine::trace_packet(network, &packet);
-
-    // §6.3 : chemin traversant un import partiel → pas de verdict ferme,
-    // le flux est compté en échec avec la raison.
-    let partial = partial_devices_on_path(&trace, fidelity);
-    if !partial.is_empty() {
-        let list = partial
-            .iter()
-            .map(|(d, _)| format!("« {d} »"))
-            .collect::<Vec<_>>()
-            .join(", ");
-        return broken(
-            None,
-            format!(
-                "verdict non ferme : le chemin traverse un modèle partiel ({list}) — \
-                 lancez `calque model check` (§6.3)"
-            ),
-        );
-    }
+    // C'est le moteur qui décide de la fermeté : une lacune SUR le chemin
+    // décisif (règle sur-approximée, objet externe non résolu…) sort en
+    // `Unknown` — compté en échec avec la raison précise ci-dessous. Une
+    // lacune HORS du chemin n'a plus d'effet. `allow_partial` force le
+    // verdict sur la partie modélisée.
+    let trace = calque_engine::trace_packet_opts(network, &packet, allow_partial);
 
     let actual = match trace.verdict {
         calque_engine::Verdict::Allowed => "allow",
@@ -425,14 +387,14 @@ pub fn evaluate_flow(
 /// Évalue un lot de flux déclarés, dans l'ordre donné — la brique de
 /// `calque test` et du va-et-vient Constat ↔ Calque (un `FlowResult` par
 /// flux, jamais d'erreur fatale). Mêmes exigences que [`evaluate_flow`] :
-/// modèle préparé, table de fidélité par équipement.
+/// modèle préparé ; `allow_partial` = drapeau `--allow-partial`.
 pub fn evaluate_flows(
     network: &Network,
     specs: &[FlowSpec],
-    fidelity: &BTreeMap<DeviceId, Fidelity>,
+    allow_partial: bool,
 ) -> Vec<FlowResult> {
     specs
         .iter()
-        .map(|spec| evaluate_flow(network, spec, fidelity))
+        .map(|spec| evaluate_flow(network, spec, allow_partial))
         .collect()
 }

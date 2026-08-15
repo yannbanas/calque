@@ -1112,6 +1112,9 @@ impl Converter {
             to,
             action,
             source: span,
+            // nftables : les clauses non comprises sont déjà écartées (règle
+            // sautée) ; aucune sur-approximation de correspondance résiduelle.
+            approximation: None,
         }))
     }
 

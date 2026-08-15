@@ -210,6 +210,29 @@ fn eval_rules(
         if zone_mismatch(rule, ctx.point) {
             continue;
         }
+        // Règle SUR-APPROXIMÉE non exclue par zone (§6.3) : sa correspondance
+        // dans le modèle n'est pas fiable (plus large — ou, pour une négation,
+        // le complément — de la réalité). Tout ce qui n'a pas encore été
+        // tranché et pourrait l'atteindre devient `Unknown` : on ne devine
+        // pas un ensemble accessible sur une règle dont le périmètre réel
+        // nous échappe. (Le mode concret fait de même via
+        // `EvalError::ApproximatedRuleOnPath`.)
+        if let Some(reason) = &rule.approximation {
+            out.push(unknown_part(
+                remaining,
+                prefix.to_vec(),
+                Diagnostic::error(
+                    format!(
+                        "règle « {} » sur-approximée ({reason}) sur le chemin : le modèle peut \
+                         la faire matcher plus largement que l'équipement réel — part \
+                         indéterminée (§6.3)",
+                        rule.id
+                    ),
+                    Some(rule.source.clone()),
+                ),
+            ));
+            return HeaderSet::empty();
+        }
         let hs = match rule_headerset(&ctx.device.objects, &rule.matches) {
             Ok(hs) => hs,
             // Ne jamais deviner : règle irrésoluble → tout ce qui pouvait

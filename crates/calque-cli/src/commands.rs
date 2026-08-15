@@ -7,11 +7,11 @@
 //! (refusé, non ferme, flux en échec…) d'une erreur d'exécution. Le détail
 //! par commande est documenté dans l'aide (`cli.rs`).
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-use calque_engine::{ReachReport, Trace};
+use calque_engine::Trace;
 use calque_model::{
     ConcretePacket, DeviceId, Endpoint, Fidelity, IfaceId, Link, LinkOrigin, Network, Severity,
     UnresolvedExternal, ZoneId,
@@ -330,18 +330,6 @@ fn line_byte_range(src: &str, line: u32) -> Option<std::ops::Range<usize>> {
     None
 }
 
-// ---------------------------------------------------------------------------
-// §6.3 — fidélité partielle sur le chemin
-// ---------------------------------------------------------------------------
-
-/// Les équipements traversés par la trace dont l'import est partiel :
-/// un verdict qui les traverse n'est pas ferme (§6.3). Délègue à
-/// `calque_policy::partial_devices_on_path`, sur la table de fidélité par
-/// équipement du projet.
-pub(crate) fn partial_devices_on_path(project: &Project, trace: &Trace) -> Vec<(DeviceId, usize)> {
-    calque_policy::partial_devices_on_path(trace, &project.device_fidelity)
-}
-
 /// Affiche les diagnostics accumulés par le moteur pendant la trace.
 fn print_trace_diagnostics(trace: &Trace) {
     for d in &trace.diagnostics {
@@ -425,30 +413,22 @@ fn path(root: &Path, args: PathArgs) -> miette::Result<ExitCode> {
         }
     }
 
-    // Verdict indéterminé : le moteur n'a pas pu conclure sans deviner.
+    // Verdict indéterminé : le moteur n'a pas pu conclure sans deviner —
+    // ce qui inclut désormais une lacune de modélisation SUR le chemin
+    // décisif (règle sur-approximée `groups`/`internet-service`/négation…,
+    // objet externe non résolu, cycle, ECMP divergent). Les diagnostics
+    // ci-dessous pointent la CAUSE PRÉCISE (règle N ligne L, objet X…). Une
+    // lacune HORS du chemin décisif ne rend plus le verdict non ferme :
+    // c'était trop conservateur (§6.3).
     if matches!(view.verdict, VerdictView::Unknown) {
         if args.format == DataFormat::Text {
             if !args.explain {
                 print_trace_diagnostics(&trace);
             }
-            println!("\nVerdict NON FERME (code de sortie {EXIT_NON_FIRM}).");
-        }
-        return Ok(ExitCode::from(EXIT_NON_FIRM));
-    }
-
-    // §6.3 : un équipement traversé a un import partiel → pas de verdict
-    // ferme, même si le moteur a conclu sur ce que le modèle contient.
-    let partial = partial_devices_on_path(&project, &trace);
-    if !partial.is_empty() {
-        if args.format == DataFormat::Text {
-            let list = partial
-                .iter()
-                .map(|(d, n)| format!("« {d} » ({n} directive(s) non comprise(s))"))
-                .collect::<Vec<_>>()
-                .join(", ");
             println!(
-                "\nAttention : verdict NON FERME — le chemin traverse un modèle partiel : {list}.\n\
-                 Lancez `calque model check` pour le détail (code de sortie {EXIT_NON_FIRM})."
+                "\nVerdict NON FERME (code de sortie {EXIT_NON_FIRM}) : voir la cause \
+                 ci-dessus. `--allow-partial` (sur `calque test`) force un verdict sur la \
+                 partie modélisée."
             );
         }
         return Ok(ExitCode::from(EXIT_NON_FIRM));
@@ -558,25 +538,6 @@ fn reach_headerset(
     HeaderSet::from_cube(cube)
 }
 
-/// Les équipements touchés par le rapport (points d'entrée et décisions)
-/// dont l'import est partiel : le rapport n'est pas ferme (§6.3).
-fn partial_devices_in_reach(project: &Project, report: &ReachReport) -> Vec<(DeviceId, usize)> {
-    let mut seen = BTreeSet::new();
-    let mut out = Vec::new();
-    let devices = report.flows.iter().flat_map(|f| {
-        std::iter::once(&f.entry.device).chain(f.decisions.iter().map(|d| &d.device))
-    });
-    for device in devices {
-        if !seen.insert(device.clone()) {
-            continue;
-        }
-        if let Fidelity::Partial { unsupported } = project.fidelity_of(device) {
-            out.push((device.clone(), unsupported.len()));
-        }
-    }
-    out
-}
-
 fn reach(root: &Path, args: ReachArgs) -> miette::Result<ExitCode> {
     let (raw, is_to) = match (&args.to, &args.from) {
         (Some(t), None) => (t.as_str(), true),
@@ -615,27 +576,21 @@ fn reach(root: &Path, args: ReachArgs) -> miette::Result<ExitCode> {
         DataFormat::Json => println!("{}", calque_report::render_reach_json(&view)),
     }
 
-    // §6.3 : parts non décidables, ou modèle partiel sur un équipement
-    // touché → rapport NON FERME, code de sortie dédié.
+    // §6.3 : parts non décidables → rapport NON FERME, code de sortie dédié.
+    // Cela inclut désormais toute part dont la décision dépend d'une lacune
+    // SUR le chemin (règle sur-approximée, objet externe non résolu…), que le
+    // moteur symbolique signale par un diagnostic d'erreur. Une lacune HORS
+    // du chemin décisif ne rend plus le rapport non ferme.
     let has_undecidable = report
         .diagnostics
         .iter()
         .any(|d| d.severity == Severity::Error);
-    let partial = partial_devices_in_reach(&project, &report);
-    if has_undecidable || !partial.is_empty() {
+    if has_undecidable {
         if args.format == DataFormat::Text {
-            if !partial.is_empty() {
-                let list = partial
-                    .iter()
-                    .map(|(d, n)| format!("« {d} » ({n} directive(s) non comprise(s))"))
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                println!(
-                    "\nAttention : le rapport traverse un modèle partiel : {list}.\n\
-                     Lancez `calque model check` pour le détail."
-                );
-            }
-            println!("\nRapport NON FERME (code de sortie {EXIT_NON_FIRM}).");
+            println!(
+                "\nRapport NON FERME (code de sortie {EXIT_NON_FIRM}) : voir les diagnostics \
+                 ci-dessus pour la cause précise."
+            );
         }
         return Ok(ExitCode::from(EXIT_NON_FIRM));
     }
@@ -685,9 +640,12 @@ fn test(root: &Path, args: TestArgs) -> miette::Result<ExitCode> {
     // préparation du modèle que `path` et `plan`, faite une fois pour
     // toute la suite.
     let prepared = backend::prepare_for_engine(&project.network);
-    // `--allow-partial` : la carte de fidélité vidée désactive le refus
-    // de verdict ferme (§6.3) — assumé et rappelé sur stderr.
-    let fidelity = if args.allow_partial {
+    // C'est le moteur qui décide de la fermeté : un flux dont la décision
+    // dépend d'une lacune SUR le chemin (règle sur-approximée, objet externe
+    // non résolu…) sort NON FERME et compte en échec. `--allow-partial`
+    // force le verdict sur la seule partie modélisée — assumé, rappelé sur
+    // stderr quand des équipements sont à fidélité partielle.
+    if args.allow_partial {
         let partiels = project
             .device_fidelity
             .iter()
@@ -696,15 +654,13 @@ fn test(root: &Path, args: TestArgs) -> miette::Result<ExitCode> {
         if partiels > 0 {
             eprintln!(
                 "Attention : --allow-partial — {partiels} équipement(s) à fidélité \
-                 PARTIELLE ; les verdicts s'appuient sur la partie modélisée \
-                 (lancez `calque model check` pour ce qui ne l'est pas)."
+                 PARTIELLE ; les verdicts s'appuient sur la partie modélisée, sans \
+                 tenir compte des règles sur-approximées ni des objets non résolus \
+                 sur le chemin (lancez `calque model check` pour le détail)."
             );
         }
-        std::collections::BTreeMap::new()
-    } else {
-        project.device_fidelity.clone()
-    };
-    let results = calque_policy::evaluate_flows(&prepared, &flows.flows, &fidelity);
+    }
+    let results = calque_policy::evaluate_flows(&prepared, &flows.flows, args.allow_partial);
 
     match args.format {
         OutputFormat::Text => print!("{}", calque_report::render_flow_results_text(&results)),

@@ -65,6 +65,7 @@ mod tests {
             to: to.map(ZoneId::new),
             action: Action::Accept,
             source: SourceSpan::new("test.conf", 1),
+            approximation: None,
         }
     }
 

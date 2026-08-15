@@ -530,6 +530,19 @@ pub struct Rule {
     /// Fichier + ligne, pour la traçabilité. Jamais optionnel :
     /// une règle sans origine ne peut pas justifier un verdict.
     pub source: SourceSpan,
+    /// La correspondance de cette règle est SUR-APPROXIMÉE — le modèle peut
+    /// la faire matcher PLUS largement que l'équipement réel (restriction par
+    /// identité `groups`/`users`/`fsso-groups`, jeux d'IP prédéfinis
+    /// `internet-service`, négation `*-negate`, `nat46`/`nat64`…). Le
+    /// convertisseur laisse ces clés en `unsupported` (fidélité `Partial`)
+    /// mais construit tout de même la règle ; ce champ porte la RAISON courte
+    /// pour que le moteur rende un verdict NON FERME (`Unknown`) dès qu'une
+    /// décision peut dépendre d'une telle règle sur le chemin (§6.3 : jamais
+    /// de faux « autorisé »). `None` = correspondance fidèle, sans risque de
+    /// sur-approximation. Champ pur et sérialisable ; `#[serde(default)]`
+    /// pour rester compatible avec un modèle sérialisé avant son ajout.
+    #[serde(default)]
+    pub approximation: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

@@ -436,15 +436,14 @@ pub fn verify(root: &Path, args: VerifyArgs) -> miette::Result<ExitCode> {
             }
         };
         let trace = crate::backend::trace_concrete(&project.network, &packet);
-        let partial = commands::partial_devices_on_path(&project, &trace);
-        let model = if !partial.is_empty() {
-            ModelSays::NotFirm
-        } else {
-            match trace.verdict {
-                Verdict::Allowed => ModelSays::Allow,
-                Verdict::Denied | Verdict::NoRoute | Verdict::Loop => ModelSays::Deny,
-                Verdict::Unknown => ModelSays::NotFirm,
-            }
+        // C'est le moteur qui décide de la fermeté : un `Unknown` couvre
+        // désormais les lacunes SUR le chemin (règle sur-approximée, objet
+        // externe non résolu…). Une lacune HORS du chemin ne rend plus le
+        // verdict non ferme.
+        let model = match trace.verdict {
+            Verdict::Allowed => ModelSays::Allow,
+            Verdict::Denied | Verdict::NoRoute | Verdict::Loop => ModelSays::Deny,
+            Verdict::Unknown => ModelSays::NotFirm,
         };
 
         // La sonde RÉELLE.

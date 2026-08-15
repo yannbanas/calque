@@ -26,8 +26,7 @@
 pub mod eval;
 
 pub use eval::{
-    evaluate_flow, evaluate_flows, flow_packet, partial_devices_on_path, FlowResult, FlowStatus,
-    EPHEMERAL_SPORT,
+    evaluate_flow, evaluate_flows, flow_packet, FlowResult, FlowStatus, EPHEMERAL_SPORT,
 };
 
 use std::fmt;

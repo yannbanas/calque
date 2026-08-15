@@ -41,7 +41,7 @@ use calque_model::{
 use ipnet::IpNet;
 
 use crate::error::EvalError;
-use crate::policy::{evaluate_policy, FilterPoint, FilterResult, NatGrant};
+use crate::policy::{evaluate_policy_opts, FilterPoint, FilterResult, NatGrant};
 use crate::route::{lookup_route, EcmpRoute, RouteDecision};
 use crate::trace::{Decision, Hop, Outcome, Stage, Trace, Verdict};
 
@@ -227,6 +227,7 @@ fn process_device(
     pkt: &mut ConcretePacket,
     hop: &mut Hop,
     diagnostics: &mut Vec<Diagnostic>,
+    allow_partial: bool,
 ) -> Result<DeviceStep, EvalError> {
     let in_iface = device
         .interfaces
@@ -263,7 +264,14 @@ fn process_device(
             .ok_or_else(|| EvalError::PolicyMissing {
                 policy: pid.clone(),
             })?;
-        let ev = evaluate_policy(device, policy, pkt, &ingress_point, Stage::IngressFilter)?;
+        let ev = evaluate_policy_opts(
+            device,
+            policy,
+            pkt,
+            &ingress_point,
+            Stage::IngressFilter,
+            allow_partial,
+        )?;
         hop.decisions.extend(ev.decisions);
         diagnostics.extend(ev.diagnostics);
         match ev.result {
@@ -351,6 +359,7 @@ fn process_device(
 /// Filtres de sortie puis SNAT pour UNE interface de sortie candidate
 /// (zones d'entrée ET de sortie connues). Rend `true` si un filtre refuse ;
 /// mute `pkt` (SNAT) et remplit `hop`.
+#[allow(clippy::too_many_arguments)]
 fn process_egress(
     device: &Device,
     in_zone: &Option<ZoneId>,
@@ -359,6 +368,7 @@ fn process_egress(
     pkt: &mut ConcretePacket,
     hop: &mut Hop,
     diagnostics: &mut Vec<Diagnostic>,
+    allow_partial: bool,
 ) -> Result<bool, EvalError> {
     let egress_point = FilterPoint::Egress {
         in_zone: in_zone.clone(),
@@ -371,7 +381,14 @@ fn process_egress(
             .ok_or_else(|| EvalError::PolicyMissing {
                 policy: pid.clone(),
             })?;
-        let ev = evaluate_policy(device, policy, pkt, &egress_point, Stage::EgressFilter)?;
+        let ev = evaluate_policy_opts(
+            device,
+            policy,
+            pkt,
+            &egress_point,
+            Stage::EgressFilter,
+            allow_partial,
+        )?;
         hop.decisions.extend(ev.decisions);
         diagnostics.extend(ev.diagnostics);
         match ev.result {
@@ -445,6 +462,10 @@ enum BranchStep {
 struct Walker<'a> {
     network: &'a Network,
     ecmp_budget: usize,
+    /// `--allow-partial` : force l'évaluation sur la partie modélisée
+    /// (règles sur-approximées traitées telles quelles, objets externes non
+    /// résolus comptés comme « ne matchent pas »). Voir `evaluate_policy_opts`.
+    allow_partial: bool,
 }
 
 impl Walker<'_> {
@@ -492,7 +513,14 @@ impl Walker<'_> {
                 header_out: pkt,
                 decisions: Vec::new(),
             };
-            let step = process_device(device, &cur_iface, &mut pkt, &mut hop, &mut diagnostics);
+            let step = process_device(
+                device,
+                &cur_iface,
+                &mut pkt,
+                &mut hop,
+                &mut diagnostics,
+                self.allow_partial,
+            );
             hop.header_out = pkt;
 
             match step {
@@ -611,6 +639,7 @@ impl Walker<'_> {
             &mut pkt,
             &mut hop,
             &mut diagnostics,
+            self.allow_partial,
         ) {
             Ok(denied) => denied,
             Err(e) => {
@@ -967,10 +996,12 @@ fn run(
     cur_iface: IfaceId,
     packet: &ConcretePacket,
     diagnostics: Vec<Diagnostic>,
+    allow_partial: bool,
 ) -> Trace {
     let mut walker = Walker {
         network,
         ecmp_budget: MAX_ECMP_TOTAL_BRANCHES,
+        allow_partial,
     };
     walker.walk(
         cur_device,
@@ -984,7 +1015,20 @@ fn run(
 
 /// Trace un paquet concret à travers le réseau, en localisant d'abord la
 /// source (§5.1). C'est le point d'entrée principal du moteur.
+///
+/// Une lacune de modélisation SUR le chemin décisif (règle sur-approximée,
+/// objet externe non résolu, cycle, ECMP divergent…) donne `Verdict::Unknown`
+/// — jamais un ferme à tort (§6.3). Pour forcer un verdict sur la seule
+/// partie modélisée, voir [`trace_packet_opts`].
 pub fn trace_packet(network: &Network, packet: &ConcretePacket) -> Trace {
+    trace_packet_opts(network, packet, false)
+}
+
+/// Comme [`trace_packet`], mais `allow_partial` (drapeau `--allow-partial`)
+/// force l'évaluation sur la partie MODÉLISÉE : les règles sur-approximées
+/// sont évaluées telles quelles et les objets externes non résolus comptent
+/// comme « ne matchent pas ». Verdict assumé, à n'employer que sciemment.
+pub fn trace_packet_opts(network: &Network, packet: &ConcretePacket, allow_partial: bool) -> Trace {
     let mut diagnostics = Vec::new();
 
     let entry = match locate_source(network, &packet.src) {
@@ -1004,7 +1048,7 @@ pub fn trace_packet(network: &Network, packet: &ConcretePacket) -> Trace {
     // l'adresse d'un équipement modélisé (ses filtres s'appliquent alors).
     if entry.net.contains(&packet.dst) {
         match owner_of_address(network, &packet.dst) {
-            Ok(Some((d, i))) => return run(network, d, i, packet, diagnostics),
+            Ok(Some((d, i))) => return run(network, d, i, packet, diagnostics, allow_partial),
             Ok(None) => {
                 diagnostics.push(info(format!(
                     "source et destination sur le même réseau connecté {} : \
@@ -1028,7 +1072,14 @@ pub fn trace_packet(network: &Network, packet: &ConcretePacket) -> Trace {
         }
     }
 
-    run(network, entry.device, entry.iface, packet, diagnostics)
+    run(
+        network,
+        entry.device,
+        entry.iface,
+        packet,
+        diagnostics,
+        allow_partial,
+    )
 }
 
 /// Variante avec point d'entrée explicite (utile quand la localisation
@@ -1059,6 +1110,7 @@ pub fn trace_packet_from(network: &Network, entry: &Endpoint, packet: &ConcreteP
         entry.iface.clone(),
         packet,
         Vec::new(),
+        false,
     )
 }
 
@@ -1124,6 +1176,7 @@ mod tests {
             to: to.map(ZoneId::new),
             action,
             source: span(line),
+            approximation: None,
         }
     }
 
@@ -1256,6 +1309,159 @@ mod tests {
         assert_eq!(d.stage, Stage::EgressFilter);
         assert_eq!(d.outcome, Outcome::Accepted);
         assert!(d.shadowed_by.is_empty());
+    }
+
+    /// Marque une règle SUR-APPROXIMÉE (comme le fait le convertisseur pour
+    /// `groups`/`internet-service`/négation…).
+    fn approx(mut r: Rule, reason: &str) -> Rule {
+        r.approximation = Some(reason.to_owned());
+        r
+    }
+
+    /// Une règle SUR-APPROXIMÉE DÉCISIVE (elle matche et accepte le flux)
+    /// rend le verdict NON FERME (`Unknown`) : le modèle peut la faire
+    /// matcher plus largement que l'équipement réel → jamais de faux
+    /// « autorisé » (§6.3). La cause précise (règle 10) est diagnostiquée.
+    #[test]
+    fn regle_approximee_decisive_rend_unknown() {
+        let mut rules = standard_rules();
+        rules[0] = approx(rules[0].clone(), "restriction par identité");
+        let network = with_fw1_egress(rules, Action::Deny);
+        let trace = trace_packet(&network, &tcp("10.0.10.5", "10.0.20.5", 445));
+        assert_eq!(trace.verdict, Verdict::Unknown);
+        assert!(
+            trace
+                .diagnostics
+                .iter()
+                .any(|d| d.message.contains("sur-approximée") && d.message.contains("10")),
+            "cause précise attendue : {:?}",
+            trace.diagnostics
+        );
+    }
+
+    /// `--allow-partial` (via `trace_packet_opts`) force le verdict sur la
+    /// partie modélisée : la même règle approximée redevient décisive et le
+    /// flux est autorisé (verdict assumé).
+    #[test]
+    fn allow_partial_force_le_verdict_sur_la_partie_modelisee() {
+        let mut rules = standard_rules();
+        rules[0] = approx(rules[0].clone(), "restriction par identité");
+        let network = with_fw1_egress(rules, Action::Deny);
+        let trace = trace_packet_opts(&network, &tcp("10.0.10.5", "10.0.20.5", 445), true);
+        assert_eq!(trace.verdict, Verdict::Allowed);
+    }
+
+    /// Une règle approximée ANTÉRIEURE qui matche le paquet masque la vraie
+    /// décision (règle modélisée qui suivrait) : verdict NON FERME.
+    #[test]
+    fn regle_approximee_anterieure_qui_masque_rend_unknown() {
+        // La règle « 5 » (approximée) matche le flux et précède la « 10 ».
+        let mut rules = vec![approx(
+            rule(
+                "5",
+                vec![AddrExpr::Net(net("10.0.10.0/24"))],
+                vec![AddrExpr::Net(net("10.0.20.5/32"))],
+                vec![tcp_svc(445)],
+                Some("lan"),
+                Some("wan"),
+                Action::Accept,
+                50,
+            ),
+            "internet-service (jeux d'IP prédéfinis)",
+        )];
+        rules.extend(standard_rules());
+        let network = with_fw1_egress(rules, Action::Deny);
+        let trace = trace_packet(&network, &tcp("10.0.10.5", "10.0.20.5", 445));
+        assert_eq!(trace.verdict, Verdict::Unknown);
+        assert!(trace
+            .diagnostics
+            .iter()
+            .any(|d| d.message.contains("sur-approximée")));
+    }
+
+    /// Une règle approximée EXCLUE PAR ZONE pour ce paquet ne le concerne
+    /// pas : la décision revient à une règle pleinement modélisée → verdict
+    /// FERME. C'est le cœur du correctif : une lacune HORS du chemin décisif
+    /// (ici, mauvaise zone d'entrée) ne rend plus le verdict non ferme.
+    #[test]
+    fn regle_approximee_hors_zone_reste_ferme() {
+        // La règle approximée « 5 » n'accepte que depuis la zone « guest » :
+        // le flux vient de « lan », elle est donc exclue et n'entre pas en
+        // ligne de compte. La « 10 » (modélisée) décide.
+        let mut rules = vec![approx(
+            rule(
+                "5",
+                vec![],
+                vec![],
+                vec![],
+                Some("guest"),
+                Some("wan"),
+                Action::Deny,
+                50,
+            ),
+            "restriction par identité",
+        )];
+        rules.extend(standard_rules());
+        let network = with_fw1_egress(rules, Action::Deny);
+        let trace = trace_packet(&network, &tcp("10.0.10.5", "10.0.20.5", 445));
+        assert_eq!(trace.verdict, Verdict::Allowed);
+    }
+
+    /// Un objet externe non résolu porté par une règle située APRÈS la
+    /// décision (donc HORS du chemin décisif) n'est jamais évalué : verdict
+    /// FERME (inchangé). Sur le chemin décisif, il rendrait `Unknown` — c'est
+    /// couvert par les tests de `resolve.rs`.
+    #[test]
+    fn objet_externe_hors_chemin_reste_ferme() {
+        use calque_model::ExternalKind;
+        let mut rules = standard_rules();
+        // Une règle « 99 » APRÈS la « 10 » décisive, visant un objet fqdn
+        // non résolu : jamais atteinte pour ce flux.
+        rules.push(rule(
+            "99",
+            vec![],
+            vec![AddrExpr::Object(ObjectId::new("FQDN"))],
+            vec![],
+            Some("lan"),
+            Some("wan"),
+            Action::Deny,
+            900,
+        ));
+        let mut network = with_fw1_egress(rules, Action::Deny);
+        let fw1 = network.devices.get_mut(&DeviceId::new("fw1")).expect("fw1");
+        fw1.objects.addresses.insert(
+            ObjectId::new("FQDN"),
+            AddrObject::External {
+                kind: ExternalKind::Fqdn,
+                hint: "example.com".to_owned(),
+            },
+        );
+        let trace = trace_packet(&network, &tcp("10.0.10.5", "10.0.20.5", 445));
+        assert_eq!(trace.verdict, Verdict::Allowed);
+    }
+
+    /// Une règle approximée située APRÈS la décision (règle modélisée
+    /// décisive plus haut) n'est jamais atteinte → verdict FERME.
+    #[test]
+    fn regle_approximee_apres_la_decision_reste_ferme() {
+        let mut rules = standard_rules();
+        // Ajoute une règle approximée large APRÈS la « 10 » décisive.
+        rules.push(approx(
+            rule(
+                "99",
+                vec![],
+                vec![],
+                vec![],
+                Some("lan"),
+                Some("wan"),
+                Action::Accept,
+                900,
+            ),
+            "restriction par identité",
+        ));
+        let network = with_fw1_egress(rules, Action::Deny);
+        let trace = trace_packet(&network, &tcp("10.0.10.5", "10.0.20.5", 445));
+        assert_eq!(trace.verdict, Verdict::Allowed);
     }
 
     #[test]

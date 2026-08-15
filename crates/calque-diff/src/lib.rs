@@ -365,6 +365,7 @@ mod tests {
             to: None,
             action,
             source: SourceSpan::new("fw-01.conf", line),
+            approximation: None,
         }
     }
 

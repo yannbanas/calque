@@ -60,6 +60,7 @@ fn rule(
         to: None,
         action,
         source: SourceSpan::new("bench.conf", line),
+        approximation: None,
     }
 }
 

@@ -1136,6 +1136,9 @@ impl Converter {
                 }),
             }),
             source: span,
+            // OPNsense : aucune sur-approximation de correspondance connue
+            // ici (pas d'équivalent identité/internet-service géré) → fidèle.
+            approximation: None,
         })
     }
 
@@ -1378,6 +1381,7 @@ impl Converter {
             to: None,
             action,
             source: span,
+            approximation: None,
         })
     }
 

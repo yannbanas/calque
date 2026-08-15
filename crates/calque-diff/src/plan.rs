@@ -831,6 +831,7 @@ mod tests {
             to: None,
             action,
             source: span(line),
+            approximation: None,
         }
     }
 

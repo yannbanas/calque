@@ -7,7 +7,29 @@ majeur.
 
 ## [Unreleased]
 
-Rien pour l'instant.
+### Modifié
+
+- **Fidélité par CHEMIN, plus par équipement.** Un verdict `path`/`test`/
+  `reach` n'est plus déclaré « non ferme » simplement parce que
+  l'équipement a une lacune de modélisation quelque part : il l'est
+  UNIQUEMENT si une lacune touche le CHEMIN DÉCISIF du paquet analysé.
+  C'est le moteur pur qui trancherend `Verdict::Unknown` sur le chemin
+  (objet externe non résolu, ou règle sur-approximée décisive). Sur une
+  configuration réelle par ailleurs partielle, un `calque path` vers un
+  serveur bien modélisé est désormais FERME (code 0) SANS `--allow-partial`.
+- **Jamais de faux « autorisé » (§6.3).** Les règles dont la correspondance
+  est SUR-APPROXIMÉE dans le modèle — restriction par identité
+  (`groups`/`users`/`fsso-groups`), `internet-service`, négation
+  (`*-negate`), `nat46/64`, planification temporelle non-`always` — sont
+  marquées (`Rule::approximation`). Si une telle règle peut décider sur le
+  chemin (décisive, ou antérieure non exclue par zone), le verdict reste
+  NON FERME avec la cause précise (« règle N sur-approximée, raison »), au
+  lieu de risquer un ferme erroné.
+- `calque test --allow-partial` : le drapeau ne contourne plus une fidélité
+  globale ; il force l'évaluation sur la partie modélisée (règles
+  approximées traitées sur leur correspondance modèle, objets externes non
+  résolus = « ne matchent pas »), avec avertissement. Inutile pour tout
+  chemin sans lacune décisive.
 
 ## [0.5.0] — 2026-08-14
 

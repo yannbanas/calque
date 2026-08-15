@@ -49,12 +49,14 @@ mod testutil;
 pub use dead::{
     dead_rules, dead_rules_report, DeadRule, DeadRuleKind, DeadRulesReport, Masker, MAX_UNION_CUBES,
 };
-pub use engine::{trace_packet, trace_packet_from, MAX_ECMP_TOTAL_BRANCHES};
+pub use engine::{trace_packet, trace_packet_from, trace_packet_opts, MAX_ECMP_TOTAL_BRANCHES};
 pub use error::EvalError;
-pub use policy::{evaluate_policy, FilterPoint, FilterResult, NatGrant, PolicyEvaluation};
+pub use policy::{
+    evaluate_policy, evaluate_policy_opts, FilterPoint, FilterResult, NatGrant, PolicyEvaluation,
+};
 pub use prepare::prepare_for_engine;
 pub use reach::{reach_from, reach_to, ReachFlow, ReachReport};
-pub use resolve::packet_matches_rule;
+pub use resolve::{packet_matches_rule, packet_matches_rule_opts};
 pub use route::{lookup_route, EcmpRoute, RouteDecision, MAX_ECMP_ROUTES};
 pub use symbolic::rule_headerset;
 pub use sympolicy::{evaluate_policy_symbolic, SymFilterResult, SymbolicPart, MAX_CUBES};

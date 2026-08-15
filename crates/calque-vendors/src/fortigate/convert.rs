@@ -1698,6 +1698,7 @@ impl Converter {
                 to,
                 action: Action::Accept,
                 source: p2.span,
+                approximation: None,
             });
             if !self.device.pipeline.egress.contains(&pid) {
                 self.device.pipeline.egress.push(pid);
@@ -1727,6 +1728,7 @@ impl Converter {
                     to,
                     action: Action::Deny,
                     source: span,
+                    approximation: None,
                 });
             }
         }
@@ -2392,6 +2394,13 @@ impl Converter {
             let mut action_kw: Option<String> = None;
             let mut nat = false;
             let mut disabled = false;
+            // Raison de SUR-APPROXIMATION de la correspondance (§6.3) : une
+            // clé comprise mais NON modélisée qui fait matcher le modèle plus
+            // largement (ou autrement) que l'équipement réel. Diagnostiquée
+            // (fidélité `Partial`) ET portée sur la `Rule` construite, pour
+            // que le moteur rende NON FERME toute décision qui en dépend sur
+            // le chemin — jamais un faux « autorisé ».
+            let mut approximation: Option<String> = None;
 
             for d in &edit.children {
                 if d.keyword != "set" {
@@ -2416,15 +2425,22 @@ impl Converter {
                     Some("schedule") => {
                         // `always` est l'absence de contrainte ; toute
                         // autre planification est temporelle, non
-                        // modélisée : on ne devine pas.
+                        // modélisée : on ne devine pas. Le modèle rend la
+                        // règle active EN PERMANENCE (correspondance plus
+                        // large que la réalité, restreinte dans le temps) :
+                        // c'est une sur-approximation.
                         if d.arg(1) != Some("always") {
                             self.unsupported(
                                 format!(
-                                    "planification `{}` non modélisée (politique {num})",
+                                    "planification `{}` non modélisée (politique {num}) : \
+                                     règle SUR-APPROXIMÉE (active en permanence dans le \
+                                     modèle)",
                                     d.arg(1).unwrap_or("?")
                                 ),
                                 &d.span,
                             );
+                            approximation
+                                .get_or_insert_with(|| "planification temporelle".to_owned());
                         }
                     }
                     // Reconnus, sans effet sur la DÉCISION autoriser/refuser.
@@ -2480,12 +2496,82 @@ impl Converter {
                     ) => {}
                     // ATTENTION — ces clés CHANGENT le périmètre de la règle
                     // et NE doivent PAS être avalées en silence (ce serait
-                    // sur-approximer → risque de faux « autorisé », §6.3) :
+                    // sur-approximer → risque de faux « autorisé », §6.3).
+                    // Elles restent diagnostiquées (Partial) ET marquent la
+                    // règle `approximation = Some(...)` pour que le moteur
+                    // rende NON FERME toute décision qui en dépend.
+                    //
                     // `groups`/`users`/`fsso-groups` restreignent aux
-                    // identités authentifiées ; `internet-service*` remplace
-                    // les adresses par des jeux d'IP prédéfinis ; `*-negate`
-                    // INVERSE la correspondance ; `nat46/64` change
-                    // l'adressage. Elles restent diagnostiquées (Partial).
+                    // identités authentifiées (le modèle matche sans exiger
+                    // l'authentification).
+                    Some(k @ ("groups" | "users" | "fsso-groups")) => {
+                        self.unsupported(
+                            format!(
+                                "`set {k}` (restriction par identité) non modélisé dans la \
+                                 politique {num} : règle SUR-APPROXIMÉE (le modèle matche sans \
+                                 exiger l'identité authentifiée)"
+                            ),
+                            &d.span,
+                        );
+                        approximation.get_or_insert_with(|| "restriction par identité".to_owned());
+                    }
+                    // `internet-service*` (source ou destination) remplace les
+                    // adresses par des jeux d'IP prédéfinis, non modélisés. Le
+                    // diagnostic est conservé pour toutes ces clés (fidélité
+                    // inchangée), mais l'approximation n'est marquée que quand
+                    // la clé RESTREINT réellement le match : les bascules
+                    // `internet-service`/`internet-service-src` seulement à
+                    // `enable` (leur `disable` par défaut, souvent exporté, ne
+                    // sur-approxime rien) ; les clés porteuses de valeurs
+                    // (`-name`/`-id`/`-group`/`-custom`…) dès qu'elles sont là.
+                    Some(k) if k.starts_with("internet-service") => {
+                        self.unsupported(
+                            format!(
+                                "`set {k}` (jeux d'IP prédéfinis) non modélisé dans la \
+                                 politique {num}"
+                            ),
+                            &d.span,
+                        );
+                        let bascule = matches!(k, "internet-service" | "internet-service-src");
+                        if !bascule || d.arg(1) == Some("enable") {
+                            approximation.get_or_insert_with(|| {
+                                "internet-service (jeux d'IP prédéfinis)".to_owned()
+                            });
+                        }
+                    }
+                    // `srcaddr-negate`/`dstaddr-negate`/`service-negate`
+                    // INVERSENT la correspondance : le modèle matche le
+                    // COMPLÉMENT de ce que fait l'équipement.
+                    Some(k) if k.ends_with("-negate") => {
+                        // `disable` est le défaut (sans effet) ; seule
+                        // l'activation inverse réellement la correspondance.
+                        if d.arg(1) == Some("enable") {
+                            self.unsupported(
+                                format!(
+                                    "`set {k}` (négation de correspondance) non modélisé dans \
+                                     la politique {num} : règle SUR-APPROXIMÉE (le modèle matche \
+                                     le complément de la réalité)"
+                                ),
+                                &d.span,
+                            );
+                            approximation
+                                .get_or_insert_with(|| "négation de correspondance".to_owned());
+                        }
+                    }
+                    // `nat46`/`nat64` : traduction d'adressage inter-familles,
+                    // non modélisée. Seule l'activation change l'adressage.
+                    Some(k @ ("nat46" | "nat64")) => {
+                        if d.arg(1) == Some("enable") {
+                            self.unsupported(
+                                format!(
+                                    "`set {k}` (traduction {k}) non modélisée dans la politique \
+                                     {num} : règle SUR-APPROXIMÉE (adressage traduit)"
+                                ),
+                                &d.span,
+                            );
+                            approximation.get_or_insert_with(|| format!("traduction {k}"));
+                        }
+                    }
                     Some(k) if is_cosmetic_key(k) => {}
                     other => self.unsupported(
                         format!(
@@ -2587,6 +2673,7 @@ impl Converter {
                     action,
                     // Le span du `edit N` : fichier + ligne (+ ligne du `next`).
                     source: span,
+                    approximation,
                 });
                 continue;
             }
@@ -2661,6 +2748,7 @@ impl Converter {
                         dnat: Some(vip.dnat),
                     }),
                     source: span.clone(),
+                    approximation: approximation.clone(),
                 });
             }
             if !autres.is_empty() {
@@ -2674,6 +2762,7 @@ impl Converter {
                     to,
                     action,
                     source: span,
+                    approximation,
                 });
             }
         }
@@ -3196,6 +3285,57 @@ mod tests {
         assert!(unsupported
             .iter()
             .any(|d| d.message.contains("dstaddr-negate")));
+    }
+
+    /// Une clé qui restreint le périmètre marque en plus la `Rule` construite
+    /// `approximation = Some(...)` : le moteur pourra rendre NON FERME toute
+    /// décision qui en dépend (§6.3), au lieu de sur-approximer en silence.
+    #[test]
+    fn une_regle_avec_groups_est_marquee_approximee() {
+        let out = import(
+            "config firewall policy\n    edit 1\n        set srcintf \"lan\"\n        \
+             set dstintf \"wan\"\n        set srcaddr \"all\"\n        \
+             set dstaddr \"all\"\n        set action accept\n        \
+             set groups \"employes\"\n    next\nend\n",
+        );
+        let rule = out
+            .device
+            .policies
+            .get(&PolicyId::new(FORWARD_POLICY))
+            .expect("politique forward")
+            .rules
+            .iter()
+            .find(|r| r.id.as_str() == "1")
+            .expect("règle 1");
+        assert_eq!(
+            rule.approximation.as_deref(),
+            Some("restriction par identité"),
+            "la règle doit porter la raison de sur-approximation"
+        );
+        // La fidélité reste dégradée (le diagnostic est conservé).
+        assert!(!out.fidelity.is_complete());
+    }
+
+    /// À l'inverse, une politique pleinement modélisée ne marque AUCUNE
+    /// règle approximée — un verdict qui en dépend restera ferme.
+    #[test]
+    fn une_regle_pleinement_modelisee_n_est_pas_approximee() {
+        let out = import(
+            "config firewall policy\n    edit 1\n        set srcintf \"lan\"\n        \
+             set dstintf \"wan\"\n        set srcaddr \"all\"\n        \
+             set dstaddr \"all\"\n        set action accept\n        \
+             set schedule \"always\"\n        set service \"ALL\"\n    next\nend\n",
+        );
+        let rule = out
+            .device
+            .policies
+            .get(&PolicyId::new(FORWARD_POLICY))
+            .expect("politique forward")
+            .rules
+            .iter()
+            .find(|r| r.id.as_str() == "1")
+            .expect("règle 1");
+        assert_eq!(rule.approximation, None);
     }
 
     fn import(raw: &str) -> AdapterOutput {

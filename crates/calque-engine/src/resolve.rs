@@ -41,10 +41,28 @@ pub fn packet_matches_rule(
     matches: &RuleMatch,
     pkt: &ConcretePacket,
 ) -> Result<bool, EvalError> {
-    if !addr_exprs_contain(store, &matches.src, &pkt.src)? {
+    packet_matches_rule_opts(store, matches, pkt, false)
+}
+
+/// Comme [`packet_matches_rule`], mais `allow_partial` (drapeau
+/// `--allow-partial`) décide du sort d'un objet externe non résolu
+/// (fqdn/géographie…) rencontré sur le chemin :
+/// - `false` (défaut) : l'objet non résolu remonte une erreur
+///   [`EvalError::ExternalUnresolved`] → verdict `Unknown` (jamais deviné) ;
+/// - `true` : l'objet est traité comme son ensemble VIDE (il ne matche
+///   aucun paquet), pour forcer un verdict sur la partie modélisée — c'est
+///   la sémantique documentée « ne matche aucun paquet », assumée par
+///   l'utilisateur qui a demandé `--allow-partial`.
+pub fn packet_matches_rule_opts(
+    store: &ObjectStore,
+    matches: &RuleMatch,
+    pkt: &ConcretePacket,
+    allow_partial: bool,
+) -> Result<bool, EvalError> {
+    if !addr_exprs_contain(store, &matches.src, &pkt.src, allow_partial)? {
         return Ok(false);
     }
-    if !addr_exprs_contain(store, &matches.dst, &pkt.dst)? {
+    if !addr_exprs_contain(store, &matches.dst, &pkt.dst, allow_partial)? {
         return Ok(false);
     }
     service_exprs_match(store, &matches.services, pkt)
@@ -55,12 +73,13 @@ fn addr_exprs_contain(
     store: &ObjectStore,
     exprs: &[AddrExpr],
     ip: &IpAddr,
+    allow_partial: bool,
 ) -> Result<bool, EvalError> {
     if exprs.is_empty() {
         return Ok(true);
     }
     for expr in exprs {
-        if addr_expr_contains(store, expr, ip)? {
+        if addr_expr_contains(store, expr, ip, allow_partial)? {
             return Ok(true);
         }
     }
@@ -71,11 +90,12 @@ fn addr_expr_contains(
     store: &ObjectStore,
     expr: &AddrExpr,
     ip: &IpAddr,
+    allow_partial: bool,
 ) -> Result<bool, EvalError> {
     match expr {
         AddrExpr::Any => Ok(true),
         AddrExpr::Net(net) => Ok(net.contains(ip)),
-        AddrExpr::Object(id) => addr_object_contains(store, id, ip, &mut Vec::new()),
+        AddrExpr::Object(id) => addr_object_contains(store, id, ip, &mut Vec::new(), allow_partial),
     }
 }
 
@@ -86,6 +106,7 @@ fn addr_object_contains(
     id: &ObjectId,
     ip: &IpAddr,
     stack: &mut Vec<ObjectId>,
+    allow_partial: bool,
 ) -> Result<bool, EvalError> {
     if stack.contains(id) {
         let mut path = stack.clone();
@@ -104,16 +125,24 @@ fn addr_object_contains(
         // que le verdict soit non ferme quand l'objet est sur le chemin
         // décisif (§6.3). L'évaluation ordonnée court-circuite les autres
         // dimensions d'abord : cette erreur ne remonte donc que quand
-        // l'étendue de l'objet aurait pu changer la décision.
-        AddrObject::External { kind, hint } => Err(EvalError::ExternalUnresolved {
-            object: id.clone(),
-            kind: *kind,
-            hint: hint.clone(),
-        }),
+        // l'étendue de l'objet aurait pu changer la décision. Sous
+        // `--allow-partial`, on retient la sémantique « ensemble vide »
+        // (ne matche pas) pour forcer un verdict sur la partie modélisée.
+        AddrObject::External { kind, hint } => {
+            if allow_partial {
+                Ok(false)
+            } else {
+                Err(EvalError::ExternalUnresolved {
+                    object: id.clone(),
+                    kind: *kind,
+                    hint: hint.clone(),
+                })
+            }
+        }
         AddrObject::Group(members) => {
             stack.push(id.clone());
             for member in members {
-                if addr_object_contains(store, member, ip, stack)? {
+                if addr_object_contains(store, member, ip, stack, allow_partial)? {
                     stack.pop();
                     return Ok(true);
                 }
@@ -227,9 +256,9 @@ mod tests {
         let s = store();
         let ip: IpAddr = "10.0.10.5".parse().expect("ip");
         let expr = AddrExpr::Object(ObjectId::new("GRP"));
-        assert_eq!(addr_expr_contains(&s, &expr, &ip), Ok(true));
+        assert_eq!(addr_expr_contains(&s, &expr, &ip, false), Ok(true));
         let dehors: IpAddr = "10.0.99.5".parse().expect("ip");
-        assert_eq!(addr_expr_contains(&s, &expr, &dehors), Ok(false));
+        assert_eq!(addr_expr_contains(&s, &expr, &dehors, false), Ok(false));
     }
 
     #[test]
@@ -245,7 +274,7 @@ mod tests {
         );
         let ip: IpAddr = "10.0.10.5".parse().expect("ip");
         let expr = AddrExpr::Object(ObjectId::new("A"));
-        match addr_expr_contains(&s, &expr, &ip) {
+        match addr_expr_contains(&s, &expr, &ip, false) {
             Err(EvalError::ObjectCycle { path }) => assert!(path.len() >= 3),
             other => panic!("cycle attendu, obtenu {other:?}"),
         }
@@ -273,7 +302,7 @@ mod tests {
         let s = chaine_de_groupes(MAX_GROUP_DEPTH - 2);
         let ip: IpAddr = "10.0.10.5".parse().expect("ip");
         let expr = AddrExpr::Object(ObjectId::new("G0"));
-        assert_eq!(addr_expr_contains(&s, &expr, &ip), Ok(true));
+        assert_eq!(addr_expr_contains(&s, &expr, &ip, false), Ok(true));
     }
 
     #[test]
@@ -283,7 +312,7 @@ mod tests {
         let s = chaine_de_groupes(100_000);
         let ip: IpAddr = "10.0.10.5".parse().expect("ip");
         let expr = AddrExpr::Object(ObjectId::new("G0"));
-        match addr_expr_contains(&s, &expr, &ip) {
+        match addr_expr_contains(&s, &expr, &ip, false) {
             Err(EvalError::GroupTooDeep { depth, .. }) => {
                 assert_eq!(depth, MAX_GROUP_DEPTH);
             }
@@ -297,7 +326,7 @@ mod tests {
         let ip: IpAddr = "10.0.10.5".parse().expect("ip");
         let expr = AddrExpr::Object(ObjectId::new("ABSENT"));
         assert!(matches!(
-            addr_expr_contains(&s, &expr, &ip),
+            addr_expr_contains(&s, &expr, &ip, false),
             Err(EvalError::AddrObjectMissing { .. })
         ));
     }
@@ -318,7 +347,7 @@ mod tests {
         // Non résolu : ni « matche » ni « ne matche pas » — un signalement,
         // pour que le verdict soit non ferme (§6.3).
         assert!(matches!(
-            addr_expr_contains(&s, &expr, &ip),
+            addr_expr_contains(&s, &expr, &ip, false),
             Err(EvalError::ExternalUnresolved { .. })
         ));
 
@@ -328,7 +357,7 @@ mod tests {
             ObjectId::new("FQDN"),
             AddrObject::Nets(vec!["203.0.113.0/24".parse().expect("net")]),
         );
-        assert_eq!(addr_expr_contains(&s, &expr, &ip), Ok(true));
+        assert_eq!(addr_expr_contains(&s, &expr, &ip, false), Ok(true));
     }
 
     #[test]

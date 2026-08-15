@@ -59,7 +59,27 @@ pub fn rule(
         to: to.map(ZoneId::new),
         action,
         source: span(line),
+        approximation: None,
     }
+}
+
+/// Comme [`rule`], mais la correspondance est marquée SUR-APPROXIMÉE
+/// (`groups`, `internet-service`, négation…) : le moteur doit rendre le
+/// verdict NON FERME dès que cette règle peut décider sur le chemin.
+#[allow(clippy::too_many_arguments)]
+pub fn approx_rule(
+    id: &str,
+    src: Vec<AddrExpr>,
+    dst: Vec<AddrExpr>,
+    services: Vec<ServiceExpr>,
+    from: Option<&str>,
+    to: Option<&str>,
+    action: Action,
+    line: u32,
+) -> Rule {
+    let mut r = rule(id, src, dst, services, from, to, action, line);
+    r.approximation = Some("restriction par identité".to_owned());
+    r
 }
 
 pub fn tcp_svc(dport: u16) -> ServiceExpr {

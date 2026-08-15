@@ -404,16 +404,25 @@ fn path_json_refuse_garde_le_code_de_sortie() {
     assert_eq!(v["verdict"], "Denied");
 }
 
+/// CHANGEMENT DE COMPORTEMENT (correctif UX, §6.3) : une lacune de
+/// modélisation HORS du chemin décisif ne rend plus le verdict non ferme.
+///
+/// La fixture est augmentée d'une directive inconnue dans `config system
+/// global` (réglage global sans effet sur l'accessibilité) : le modèle
+/// devient PARTIEL, mais le flux `lan → dmz` est décidé par la règle 2,
+/// PLEINEMENT modélisée. Avant, ce `path` était NON FERME (code 3) « parce
+/// que l'équipement est partiel » ; désormais il est FERME (autorisé, code 0)
+/// car aucune lacune ne touche le chemin décisif de CE paquet.
+///
+/// (L'ancien test augmentait l'interface `lan` — ce qui la REDÉFINISSAIT et
+/// effaçait son IP : le verdict devenait non ferme pour « source
+/// introuvable », pas pour la fidélité. On porte donc la lacune sur un bloc
+/// réellement hors chemin.)
 #[test]
-fn path_sur_modele_partiel_est_non_ferme() {
-    // La fixture augmentée d'une directive inconnue sur une interface :
-    // fidélité partielle → aucun verdict ferme sur un chemin qui traverse
-    // l'équipement (§6.3), code de sortie dédié 3.
+fn path_lacune_hors_chemin_est_ferme() {
     let tmp = TempDir::new().expect("répertoire temporaire");
-    let exotique = format!(
-        "{BASIC}config system interface\n    edit \"lan\"\n        set gadget-quantique enable\n    next\nend\n"
-    );
-    std::fs::write(tmp.path().join("partiel.conf"), exotique).expect("écriture");
+    let partiel = format!("{BASIC}config system global\n    set gadget-quantique enable\nend\n");
+    std::fs::write(tmp.path().join("partiel.conf"), partiel).expect("écriture");
     let out = calque(tmp.path(), &["import", "partiel.conf"]);
     assert_code(&out, 0);
     assert!(stdout(&out).contains("PARTIEL"), "avertissement d'import");
@@ -422,9 +431,64 @@ fn path_sur_modele_partiel_est_non_ferme() {
         tmp.path(),
         &["path", "10.10.1.55", "->", "10.10.2.10:8443/tcp"],
     );
+    assert_code(&out, 0); // FERME malgré le modèle partiel
+    let txt = stdout(&out);
+    assert!(txt.contains("autorisé"), "sortie path : {txt}");
+    assert!(!txt.contains("NON FERME"), "sortie path : {txt}");
+}
+
+/// À l'inverse : quand la lacune est SUR le chemin décisif — ici la règle qui
+/// décide porte `set groups` (restriction par identité SUR-APPROXIMÉE) —, le
+/// verdict est NON FERME (code 3) et pointe la CAUSE PRÉCISE (règle N, raison).
+const CONF_GROUPS: &str = "\
+#config-version=FGT60F-7.0.5-FW-build0304-220328:opmode=0:vdom=0
+config system global
+    set hostname \"fw-groups\"
+end
+config system interface
+    edit \"lan\"
+        set ip 10.0.1.1 255.255.255.0
+        set type physical
+        set role lan
+    next
+    edit \"dmz\"
+        set ip 10.0.2.1 255.255.255.0
+        set type physical
+        set role dmz
+    next
+end
+config firewall policy
+    edit 1
+        set srcintf \"lan\"
+        set dstintf \"dmz\"
+        set srcaddr \"all\"
+        set dstaddr \"all\"
+        set action accept
+        set schedule \"always\"
+        set service \"ALL\"
+        set groups \"employes\"
+    next
+end
+";
+
+#[test]
+fn path_regle_decisive_sur_approximee_est_non_ferme() {
+    let tmp = TempDir::new().expect("répertoire temporaire");
+    std::fs::write(tmp.path().join("groups.conf"), CONF_GROUPS).expect("écriture");
+    let out = calque(tmp.path(), &["import", "groups.conf"]);
+    assert_code(&out, 0);
+
+    let out = calque(
+        tmp.path(),
+        &["path", "10.0.1.50", "->", "10.0.2.10:443/tcp"],
+    );
     assert_code(&out, 3);
     let txt = stdout(&out);
     assert!(txt.contains("NON FERME"), "sortie path : {txt}");
+    assert!(
+        txt.contains("sur-approximée") && txt.contains("règle « 1 »"),
+        "la cause précise doit être pointée : {txt}"
+    );
 }
 
 // ---------------------------------------------------------------------------

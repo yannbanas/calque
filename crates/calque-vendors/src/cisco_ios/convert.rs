@@ -1432,6 +1432,10 @@ impl Converter {
                     to: to.clone(),
                     action: e.action.clone(),
                     source: e.span.clone(),
+                    // Cisco IOS : une ACL avec `object-group` irrésoluble est
+                    // déjà gérée (règle exclue) ; rien d'évident ici ne
+                    // sur-approxime la correspondance → fidèle.
+                    approximation: None,
                 })
                 .collect();
             self.device.policies.insert(
@@ -1477,6 +1481,7 @@ impl Converter {
                     to: None,
                     action: e.action.clone(),
                     source: e.span.clone(),
+                    approximation: None,
                 })
                 .collect();
             self.device.policies.insert(

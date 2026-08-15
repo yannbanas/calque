@@ -23,6 +23,17 @@ pub enum EvalError {
         kind: ExternalKind,
         hint: String,
     },
+    /// Une règle SUR-APPROXIMÉE (`Rule::approximation`) peut décider ce
+    /// paquet sur le chemin : sa correspondance dans le modèle est plus large
+    /// (ou autre) que celle de l'équipement réel — restriction par identité,
+    /// jeux d'IP `internet-service`, négation, `nat46/64`… Trancher fermement
+    /// risquerait un faux « autorisé » (§6.3). Le verdict devient `Unknown` ;
+    /// `--allow-partial` force l'évaluation sur la partie modélisée.
+    ApproximatedRuleOnPath {
+        rule: RuleId,
+        source: SourceSpan,
+        reason: String,
+    },
     /// Objet service référencé par une règle mais absent du magasin.
     ServiceObjectMissing { object: ObjectId },
     /// Cycle dans les groupes d'objets ; `path` est le chemin fautif.
@@ -66,6 +77,7 @@ impl EvalError {
     /// L'origine de configuration associée, quand elle existe.
     fn span(&self) -> Option<SourceSpan> {
         match self {
+            EvalError::ApproximatedRuleOnPath { source, .. } => Some(source.clone()),
             EvalError::EgressZoneUnknownAtIngress { source, .. } => Some(source.clone()),
             EvalError::DnatAfterRouting { source, .. } => source.clone(),
             EvalError::Inconsistent { span, .. } => span.clone(),
@@ -89,6 +101,12 @@ impl std::fmt::Display for EvalError {
                 f,
                 "objet externe « {object} » ({kind} « {hint} ») non résolu : \
                  fournissez ses préfixes via `--resolve` pour trancher (§6.3 : jamais deviné)"
+            ),
+            EvalError::ApproximatedRuleOnPath { rule, reason, .. } => write!(
+                f,
+                "décision dépendant d'une règle sur-approximée (règle « {rule} », {reason}) : \
+                 le modèle peut la faire matcher plus largement que l'équipement réel — verdict \
+                 non ferme (§6.3 : jamais de faux « autorisé »)"
             ),
             EvalError::ServiceObjectMissing { object } => {
                 write!(f, "objet service « {object} » introuvable")
