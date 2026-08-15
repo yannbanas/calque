@@ -7,6 +7,10 @@ majeur.
 
 ## [Unreleased]
 
+Rien pour l'instant.
+
+## [0.5.0] — 2026-08-14
+
 ### Ajouté
 
 - **ICMP par type et code.** Les services ICMP/ICMPv6 avec `set icmptype`
@@ -205,7 +209,8 @@ sur des configurations de production.
 - Pas éprouvé sur des configurations de production ; les retours de
   terrain sont bienvenus.
 
-[Unreleased]: https://github.com/yannbanas/calque/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/yannbanas/calque/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/yannbanas/calque/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/yannbanas/calque/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/yannbanas/calque/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/yannbanas/calque/compare/v0.1.0...v0.2.0
