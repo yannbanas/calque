@@ -128,13 +128,13 @@ jobs:
       - name: Construire
         run: cargo build --release --locked -p calque-cli --target ${{ matrix.target }}
 
-      - name: Installer nfpm
+      - name: Installer nfpm et envsubst
         run: |
           set -euo pipefail
           echo 'deb [trusted=yes] https://repo.goreleaser.com/apt/ /' \
             | sudo tee /etc/apt/sources.list.d/goreleaser.list
           sudo apt-get update
-          sudo apt-get install -y nfpm
+          sudo apt-get install -y nfpm gettext-base
 
       - name: Paquets .deb + .rpm (empreintes SHA-256)
         shell: bash
@@ -144,8 +144,14 @@ jobs:
           export PKG_ARCH="${{ matrix.arch }}"
           export BIN_PATH="target/${{ matrix.target }}/release/calque"
           mkdir -p dist
-          nfpm package -f packaging/nfpm.yaml -p deb -t dist/
-          nfpm package -f packaging/nfpm.yaml -p rpm -t dist/
+          # On rend le YAML avec envsubst (variables explicites) plutôt que
+          # de dépendre de l'expansion interne de nfpm, qui varie selon la
+          # version. Une seule source de vérité : packaging/nfpm.yaml.
+          envsubst '${PKG_VERSION} ${PKG_ARCH} ${BIN_PATH}' \
+            < packaging/nfpm.yaml > dist/nfpm.rendered.yaml
+          nfpm package -f dist/nfpm.rendered.yaml -p deb -t dist/
+          nfpm package -f dist/nfpm.rendered.yaml -p rpm -t dist/
+          rm -f dist/nfpm.rendered.yaml
           cd dist
           for f in *.deb *.rpm; do
             sha256sum "$f" > "${f}.sha256"
