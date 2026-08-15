@@ -553,6 +553,13 @@ pub struct Pipeline {
 // ---------------------------------------------------------------------------
 
 /// Un paquet précis, utilisé pour les traces et pour `sample()` (§4.1).
+///
+/// **Convention ICMP** (proto 1) et **ICMPv6** (proto 58) : ces protocoles
+/// n'ont pas de ports. On réutilise les deux dimensions de ports pour
+/// porter le type et le code, sans ajouter de dimension à l'algèbre :
+/// `dport` = type ICMP, `sport` = code ICMP. Ainsi un service « echo
+/// request » (type 8) se modélise `dport ∈ {8}`, et le reste du moteur
+/// (correspondance, espace d'en-têtes) fonctionne sans cas particulier.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct ConcretePacket {
     pub src: IpAddr,

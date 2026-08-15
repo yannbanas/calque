@@ -177,7 +177,14 @@ pub fn flow_packet(
             src,
             dst,
             proto,
-            sport: EPHEMERAL_SPORT,
+            // ICMP/ICMPv6 : `dport` = type, `sport` = code (convention de
+            // `ConcretePacket`) — on teste le code 0. Sinon port source
+            // éphémère représentatif.
+            sport: if matches!(proto, 1 | 58) {
+                0
+            } else {
+                EPHEMERAL_SPORT
+            },
             dport,
         },
         port_note,

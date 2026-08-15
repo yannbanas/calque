@@ -2011,6 +2011,11 @@ impl Converter {
             let mut services: Vec<Service> = Vec::new();
             let mut protocol: Option<String> = None;
             let mut proto_number: Option<u8> = None;
+            // ICMP : le type et le code sont modélisés dans les dimensions
+            // de ports (convention de `ConcretePacket` : dport = type,
+            // sport = code). `None` = tout type / tout code.
+            let mut icmp_type: Option<u16> = None;
+            let mut icmp_code: Option<u16> = None;
             let mut broken = false;
 
             for d in &edit.children {
@@ -2063,15 +2068,34 @@ impl Converter {
                             broken = true;
                         }
                     },
-                    // Un type/code ICMP restreint le service ; le modèle
-                    // ne porte pas cette dimension : on ne devine pas.
-                    Some("icmptype" | "icmpcode") => {
-                        self.unsupported(
-                            format!("type/code ICMP non modélisé dans le service `{name}`"),
-                            &d.span,
-                        );
-                        broken = true;
-                    }
+                    // Type/code ICMP : modélisés dans les dimensions de
+                    // ports (dport = type, sport = code). `~`/absent = tout.
+                    Some("icmptype") => match d.arg(1) {
+                        None | Some("~") => {}
+                        Some(v) => match v.parse::<u16>() {
+                            Ok(t) if t <= 255 => icmp_type = Some(t),
+                            _ => {
+                                self.unsupported(
+                                    format!("`set icmptype` invalide dans le service `{name}`"),
+                                    &d.span,
+                                );
+                                broken = true;
+                            }
+                        },
+                    },
+                    Some("icmpcode") => match d.arg(1) {
+                        None | Some("~") => {}
+                        Some(v) => match v.parse::<u16>() {
+                            Ok(c) if c <= 255 => icmp_code = Some(c),
+                            _ => {
+                                self.unsupported(
+                                    format!("`set icmpcode` invalide dans le service `{name}`"),
+                                    &d.span,
+                                );
+                                broken = true;
+                            }
+                        },
+                    },
                     Some(k) if is_cosmetic_key(k) => {}
                     other => self.unsupported(
                         format!(
@@ -2087,16 +2111,8 @@ impl Converter {
                 // Valeur par défaut de FortiOS : les portranges portent
                 // tout le sens.
                 None | Some("TCP/UDP/SCTP") | Some("TCP/UDP/UDP-Lite/SCTP") => {}
-                Some("ICMP") => services.push(Service {
-                    proto: calque_model::ProtoMatch::Number(1),
-                    sport: calque_model::PortRange::ANY,
-                    dport: calque_model::PortRange::ANY,
-                }),
-                Some("ICMP6") => services.push(Service {
-                    proto: calque_model::ProtoMatch::Number(58),
-                    sport: calque_model::PortRange::ANY,
-                    dport: calque_model::PortRange::ANY,
-                }),
+                Some("ICMP") => services.push(icmp_service(1, icmp_type, icmp_code)),
+                Some("ICMP6") => services.push(icmp_service(58, icmp_type, icmp_code)),
                 Some("IP") => match proto_number {
                     Some(n) => services.push(Service {
                         proto: calque_model::ProtoMatch::Number(n),
@@ -2641,6 +2657,21 @@ fn is_any_services(services: &[ServiceExpr]) -> bool {
     matches!(services, [] | [ServiceExpr::Any])
 }
 
+/// Un service ICMP, type/code portés par les dimensions de ports
+/// (convention de `ConcretePacket` : dport = type, sport = code). `None`
+/// = tout type / tout code (`PortRange::ANY`).
+fn icmp_service(proto: u8, icmp_type: Option<u16>, icmp_code: Option<u16>) -> Service {
+    let dim = |v: Option<u16>| match v {
+        Some(n) => PortRange::single(n),
+        None => PortRange::ANY,
+    };
+    Service {
+        proto: ProtoMatch::Number(proto),
+        sport: dim(icmp_code),
+        dport: dim(icmp_type),
+    }
+}
+
 /// Une clé `set …` qui est de la MÉTADONNÉE pure dans n'importe quel
 /// contexte d'objet : identifiants internes, commentaires, couleur,
 /// état FortiManager, redondances de type déjà captées ailleurs. Aucune
@@ -2873,6 +2904,45 @@ mod tests {
         assert_eq!(file_stem("fw-01"), "fw-01");
         assert_eq!(file_stem(".conf"), ".conf");
         assert_eq!(file_stem(""), "equipement");
+    }
+
+    /// Un service ICMP avec `set icmptype` est modélisé : le type va dans
+    /// la dimension `dport`, le code (absent) reste « tout » (convention de
+    /// `ConcretePacket`). Un `path … :8/icmp` (echo request) matche alors.
+    #[test]
+    fn service_icmp_type_modelise() {
+        let out = import(
+            "config firewall service custom\n    edit \"PING\"\n        \
+             set protocol ICMP\n        set icmptype 8\n    next\n    \
+             edit \"ICMP-ALL\"\n        set protocol ICMP\n    next\nend\n",
+        );
+        assert_eq!(out.fidelity, Fidelity::Complete, "{:?}", out.fidelity);
+        let ping = svc_obj_local(&out.device, "PING");
+        assert_eq!(
+            ping,
+            &ServiceObject::Services(vec![Service {
+                proto: ProtoMatch::Number(1),
+                sport: PortRange::ANY,       // tout code
+                dport: PortRange::single(8), // type 8 = echo request
+            }])
+        );
+        // Sans icmptype : tout type, tout code.
+        let all = svc_obj_local(&out.device, "ICMP-ALL");
+        assert_eq!(
+            all,
+            &ServiceObject::Services(vec![Service {
+                proto: ProtoMatch::Number(1),
+                sport: PortRange::ANY,
+                dport: PortRange::ANY,
+            }])
+        );
+    }
+
+    fn svc_obj_local<'a>(dev: &'a Device, name: &str) -> &'a ServiceObject {
+        dev.objects
+            .services
+            .get(&ObjectId::new(name))
+            .unwrap_or_else(|| panic!("service `{name}` absent"))
     }
 
     /// Un bloc sans effet sur l'accessibilité (messages de remplacement,

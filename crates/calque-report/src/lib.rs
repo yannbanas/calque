@@ -204,8 +204,20 @@ fn proto_label(proto: u8) -> String {
 }
 
 /// Libellé d'un paquet concret : `10.0.10.5 → 10.0.20.5:445/tcp`.
+///
+/// Pour ICMP/ICMPv6, `dport` porte le TYPE (convention de
+/// `ConcretePacket`) : `10.0.10.5 → 10.0.20.5 icmp type 8`.
 pub fn format_packet(p: &ConcretePacket) -> String {
-    format!("{} → {}:{}/{}", p.src, p.dst, p.dport, proto_label(p.proto))
+    match p.proto {
+        1 | 58 => format!(
+            "{} → {} {} type {}",
+            p.src,
+            p.dst,
+            proto_label(p.proto),
+            p.dport
+        ),
+        _ => format!("{} → {}:{}/{}", p.src, p.dst, p.dport, proto_label(p.proto)),
+    }
 }
 
 fn packet_label(p: &ConcretePacket) -> String {

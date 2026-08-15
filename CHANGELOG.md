@@ -7,7 +7,15 @@ majeur.
 
 ## [Unreleased]
 
-Rien pour l'instant.
+### Ajouté
+
+- **ICMP par type et code.** Les services ICMP/ICMPv6 avec `set icmptype`
+  / `set icmpcode` sont modélisés : le type et le code sont portés par les
+  dimensions de ports de l'algèbre (convention `ConcretePacket` :
+  `dport` = type, `sport` = code), sans nouvelle dimension. Les questions
+  d'accessibilité ICMP deviennent possibles : `calque path 10.0.0.1 ->
+  10.0.0.2:8/icmp` interroge un echo request (ping), et `reach`/`test`
+  acceptent les protocoles `icmp`/`icmp6`.
 
 ## [0.4.0] — 2026-08-14
 

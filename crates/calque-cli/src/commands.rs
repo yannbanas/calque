@@ -376,8 +376,15 @@ fn path(root: &Path, args: PathArgs) -> miette::Result<ExitCode> {
         src: args.src,
         dst,
         proto: proto.number(),
-        // Port source éphémère représentatif, documenté dans l'aide.
-        sport: backend::EPHEMERAL_SPORT,
+        // Pour ICMP/ICMPv6, `dport` porte le TYPE (convention de
+        // `ConcretePacket`) et `sport` le CODE : on interroge le code 0
+        // (celui des types courants comme echo). Pour TCP/UDP, `sport`
+        // est le port source éphémère représentatif (documenté dans l'aide).
+        sport: if matches!(proto.number(), 1 | 58) {
+            0
+        } else {
+            backend::EPHEMERAL_SPORT
+        },
         dport,
     };
     let trace = backend::trace_concrete(&project.network, &packet);

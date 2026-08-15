@@ -143,14 +143,21 @@ impl fmt::Display for EndpointSpec {
 pub enum Proto {
     Tcp,
     Udp,
+    /// Pour ICMP/ICMPv6, le « port » d'un flux dénote le TYPE ICMP
+    /// (convention de `ConcretePacket` : `dport` = type). Ex. `8/icmp` =
+    /// echo request (ping).
+    Icmp,
+    Icmp6,
 }
 
 impl Proto {
-    /// Le numéro de protocole IP (6 = tcp, 17 = udp).
+    /// Le numéro de protocole IP (6 = tcp, 17 = udp, 1 = icmp, 58 = icmpv6).
     pub fn number(self) -> u8 {
         match self {
             Proto::Tcp => 6,
             Proto::Udp => 17,
+            Proto::Icmp => 1,
+            Proto::Icmp6 => 58,
         }
     }
 
@@ -158,6 +165,8 @@ impl Proto {
         match self {
             Proto::Tcp => "tcp",
             Proto::Udp => "udp",
+            Proto::Icmp => "icmp",
+            Proto::Icmp6 => "icmp6",
         }
     }
 }
@@ -185,7 +194,7 @@ pub enum PortSpecError {
     BadFormat(String),
     #[error("numéro de port invalide : « {0} » (attendu un entier entre 0 et 65535)")]
     BadPort(String),
-    #[error("protocole inconnu : « {0} » (protocoles gérés : tcp, udp)")]
+    #[error("protocole inconnu : « {0} » (protocoles gérés : tcp, udp, icmp, icmp6)")]
     UnknownProto(String),
 }
 
@@ -207,6 +216,8 @@ impl FromStr for PortSpec {
         let proto = match proto_part.trim().to_ascii_lowercase().as_str() {
             "tcp" => Proto::Tcp,
             "udp" => Proto::Udp,
+            "icmp" => Proto::Icmp,
+            "icmp6" | "icmpv6" => Proto::Icmp6,
             other => return Err(PortSpecError::UnknownProto(other.to_owned())),
         };
         Ok(PortSpec::One { port, proto })
