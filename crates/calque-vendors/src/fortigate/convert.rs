@@ -262,7 +262,9 @@ impl Converter {
             ["system", "zone"] => self.zones_block(node),
             ["router", "static"] => self.routes_block(node),
             ["firewall", "address"] => self.addresses_block(node),
+            ["firewall", "address6"] => self.addresses6_block(node),
             ["firewall", "addrgrp"] => self.addrgrp_block(node),
+            ["firewall", "addrgrp6"] => self.addrgrp6_block(node),
             ["firewall", "service", "custom"] => self.services_block(node),
             ["firewall", "service", "group"] => self.service_group_block(node),
             ["firewall", "vip"] => self.vip_block(node),
@@ -1741,11 +1743,39 @@ impl Converter {
 
     // -- config firewall address ----------------------------------------
 
+    /// Les objets adresse INTÉGRÉS de FortiOS, présents dans `address` et
+    /// `address6` (parfois sans corps) : `all` et `none`. `all` est déjà
+    /// traité comme `Any` à la résolution des règles ; `none` matche rien
+    /// (ensemble vide). On les reconnaît pour ne pas les diagnostiquer
+    /// comme des objets incomplets. Rend `true` si le nom est intégré.
+    fn register_builtin_address(&mut self, name: &str) -> bool {
+        match name {
+            // `all` : géré comme `Any` au niveau des règles ; l'objet
+            // lui-même n'a pas besoin d'exister dans le magasin.
+            "all" => true,
+            // `none` : ensemble vide (matche aucun paquet). Inséré une
+            // seule fois (les namespaces v4/v6 de FortiOS partagent le nom
+            // dans notre magasin unique — sans conséquence, « rien » = « rien »).
+            "none" => {
+                self.device
+                    .objects
+                    .addresses
+                    .entry(ObjectId::new("none"))
+                    .or_insert_with(|| AddrObject::Nets(Vec::new()));
+                true
+            }
+            _ => false,
+        }
+    }
+
     fn addresses_block(&mut self, block: &ConfigNode) {
         for edit in &block.children {
             let Some(name) = self.edit_name(edit, "config firewall address") else {
                 continue;
             };
+            if self.register_builtin_address(&name) {
+                continue;
+            }
             let mut is_range = false;
             let mut is_iface_subnet = false;
             let mut iface_ref: Option<String> = None;
@@ -1966,9 +1996,127 @@ impl Converter {
 
     // -- config firewall addrgrp ----------------------------------------
 
-    fn addrgrp_block(&mut self, block: &ConfigNode) {
+    // -- config firewall address6 (IPv6) --------------------------------
+
+    /// Objets adresse IPv6. Le modèle et l'algèbre de pavés sont bi-pile ;
+    /// seul le format diffère : `set ip6 <CIDR>` porte directement un
+    /// préfixe (pas de couple adresse/masque comme en IPv4). Les objets
+    /// externes v6 (fqdn/geography) suivent le même chemin qu'en IPv4.
+    fn addresses6_block(&mut self, block: &ConfigNode) {
         for edit in &block.children {
-            let Some(name) = self.edit_name(edit, "config firewall addrgrp") else {
+            let Some(name) = self.edit_name(edit, "config firewall address6") else {
+                continue;
+            };
+            if self.register_builtin_address(&name) {
+                continue;
+            }
+            let mut net: Option<ipnet::IpNet> = None;
+            let mut ext: Option<(ExternalKind, String)> = None;
+            let mut broken = false;
+            for d in &edit.children {
+                if d.keyword != "set" {
+                    self.unsupported(
+                        format!(
+                            "directive `{}` non gérée dans l'objet adresse6 `{name}`",
+                            d.keyword
+                        ),
+                        &d.span,
+                    );
+                    continue;
+                }
+                match d.arg(0) {
+                    Some("ip6") => match d.arg(1).and_then(|v| v.parse::<ipnet::Ipv6Net>().ok()) {
+                        Some(v6) => net = Some(ipnet::IpNet::V6(v6.trunc())),
+                        None => {
+                            self.unsupported(
+                                format!("`set ip6` invalide dans l'objet adresse6 `{name}`"),
+                                &d.span,
+                            );
+                            broken = true;
+                        }
+                    },
+                    // Le type est un marqueur ; la VALEUR externe vient de
+                    // `set fqdn`/`set country`. `ipprefix` = préfixe direct.
+                    Some("type") => match d.arg(1) {
+                        Some("ipprefix" | "fqdn" | "geography") | None => {}
+                        other => {
+                            self.unsupported(
+                                format!(
+                                    "type d'objet adresse6 `{}` non géré (`{name}`)",
+                                    other.unwrap_or("?")
+                                ),
+                                &d.span,
+                            );
+                            broken = true;
+                        }
+                    },
+                    Some("fqdn") => {
+                        if let Some(v) = d.arg(1) {
+                            ext = Some((ExternalKind::Fqdn, v.to_owned()));
+                        }
+                    }
+                    Some("country") => {
+                        if let Some(v) = d.arg(1) {
+                            ext = Some((ExternalKind::Geography, v.to_owned()));
+                        }
+                    }
+                    Some(k) if is_cosmetic_key(k) => {}
+                    other => self.unsupported(
+                        format!(
+                            "`set {}` non géré dans l'objet adresse6 `{name}`",
+                            other.unwrap_or("")
+                        ),
+                        &d.span,
+                    ),
+                }
+            }
+            if broken {
+                continue;
+            }
+            let object = match (ext, net) {
+                (Some((kind, hint)), _) => {
+                    self.note_info(
+                        format!(
+                            "objet adresse6 `{name}` de type {kind} : étendue externe (« {hint} ») \
+                             non résolue hors ligne — fournissez ses préfixes via `--resolve`"
+                        ),
+                        &edit.span,
+                    );
+                    AddrObject::External { kind, hint }
+                }
+                (_, Some(net)) => AddrObject::Nets(vec![net]),
+                _ => {
+                    self.unsupported(
+                        format!("objet adresse6 `{name}` sans `set ip6` ni type externe"),
+                        &edit.span,
+                    );
+                    continue;
+                }
+            };
+            let oid = ObjectId::new(name.as_str());
+            if self.device.objects.addresses.contains_key(&oid) {
+                self.unsupported(
+                    format!("objet adresse6 `{name}` en collision avec un objet existant"),
+                    &edit.span,
+                );
+            }
+            self.device.objects.addresses.insert(oid, object);
+        }
+    }
+
+    fn addrgrp_block(&mut self, block: &ConfigNode) {
+        self.addrgrp_block_named(block, "config firewall addrgrp");
+    }
+
+    /// `config firewall addrgrp6` : groupes d'adresses IPv6. La sémantique
+    /// de groupe est identique à l'IPv4 (résolution tardive, §3.3).
+    fn addrgrp6_block(&mut self, block: &ConfigNode) {
+        self.addrgrp_block_named(block, "config firewall addrgrp6");
+    }
+
+    fn addrgrp_block_named(&mut self, block: &ConfigNode, context: &str) {
+        for edit in &block.children {
+            let Some(name) = self.edit_name(edit, context) else {
                 continue;
             };
             let mut members: Vec<ObjectId> = Vec::new();
@@ -2919,6 +3067,49 @@ mod tests {
         assert_eq!(file_stem("fw-01"), "fw-01");
         assert_eq!(file_stem(".conf"), ".conf");
         assert_eq!(file_stem(""), "equipement");
+    }
+
+    /// Les objets adresse IPv6 (`config firewall address6`) et leurs
+    /// groupes sont modélisés (le modèle et l'algèbre sont bi-pile) : un
+    /// préfixe v6 direct, un groupe v6, et un objet externe v6 (fqdn).
+    #[test]
+    fn objets_adresse6_et_groupe6() {
+        let out = import(
+            "config firewall address6\n    edit \"v6-lan\"\n        \
+             set ip6 2001:db8:1::/64\n    next\n    edit \"v6-srv\"\n        \
+             set ip6 2001:db8:1::10/128\n    next\n    edit \"v6-ext\"\n        \
+             set type fqdn\n        set fqdn \"srv.example.com\"\n    next\nend\n\
+             config firewall addrgrp6\n    edit \"v6-grp\"\n        \
+             set member \"v6-lan\" \"v6-srv\"\n    next\nend\n",
+        );
+        assert_eq!(out.fidelity, Fidelity::Complete, "{:?}", out.fidelity);
+        let get = |n: &str| out.device.objects.addresses.get(&ObjectId::new(n));
+        assert_eq!(
+            get("v6-lan"),
+            Some(&AddrObject::Nets(vec!["2001:db8:1::/64"
+                .parse()
+                .expect("v6")]))
+        );
+        assert_eq!(
+            get("v6-srv"),
+            Some(&AddrObject::Nets(vec!["2001:db8:1::10/128"
+                .parse()
+                .expect("v6")]))
+        );
+        assert_eq!(
+            get("v6-ext"),
+            Some(&AddrObject::External {
+                kind: ExternalKind::Fqdn,
+                hint: "srv.example.com".to_owned(),
+            })
+        );
+        assert_eq!(
+            get("v6-grp"),
+            Some(&AddrObject::Group(vec![
+                ObjectId::new("v6-lan"),
+                ObjectId::new("v6-srv")
+            ]))
+        );
     }
 
     /// Un service ICMP avec `set icmptype` est modélisé : le type va dans
