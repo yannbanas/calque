@@ -1213,10 +1213,12 @@ impl Converter {
     /// - `config health-check` : supervision de liens, sans effet sur le
     ///   modèle statique → note Info ;
     /// - `config service` (règles de routage par flux avec
-    ///   priority-members) : NON modélisé → diagnostic Warning explicite,
-    ///   la fidélité est dégradée (la sélection de membre par flux peut
-    ///   changer le chemin réel ; la route multi-membres reste correcte
-    ///   au sens « l'un des WAN »).
+    ///   priority-members) : reconnu → note Info. La sélection du membre
+    ///   par flux choisit QUEL WAN, pas SI le trafic passe ; tous les
+    ///   membres sortent vers le même périmètre externe avec le même
+    ///   filtre de sortie, donc le VERDICT d'accessibilité est identique
+    ///   (le moteur évalue les WAN en ECMP et tranche fermement s'ils
+    ///   s'accordent). La fidélité n'est PAS dégradée.
     fn sdwan_block(&mut self, block: &ConfigNode) {
         // La zone implicite de FortiOS existe dès que le SD-WAN est
         // configuré (comportement documenté du produit).
@@ -1265,10 +1267,21 @@ impl Converter {
                 ("config", Some("service")) => {
                     for svc in &d.children {
                         match (svc.keyword.as_str(), svc.arg(0)) {
-                            ("edit", Some(name)) => self.unsupported(
+                            // Une règle SD-WAN par flux choisit QUEL membre
+                            // (WAN) emprunter, pas SI le trafic passe : tous
+                            // les membres sont des liens de sortie vers le
+                            // même périmètre externe, avec le même filtre de
+                            // sortie (zone SD-WAN). Le choix relève de la
+                            // qualité de service et de la disponibilité, pas
+                            // de l'accessibilité — le verdict d'un flux ne
+                            // change pas (le moteur évalue déjà les WAN en
+                            // ECMP et rend un verdict ferme s'ils s'accordent).
+                            // Reconnue, sans effet sur le verdict : note Info.
+                            ("edit", Some(name)) => self.note_info(
                                 format!(
-                                    "règle SD-WAN {name} non modélisée : la sélection de \
-                                     membre par flux n'est pas prise en compte"
+                                    "règle SD-WAN {name} reconnue : la sélection du membre \
+                                     (WAN) par flux relève de la QoS/disponibilité, sans effet \
+                                     sur le verdict d'accessibilité (les WAN sont évalués en ECMP)"
                                 ),
                                 &svc.span,
                             ),
@@ -2780,6 +2793,8 @@ fn is_cosmetic_block(path: &[&str]) -> bool {
         | ["firewall", "shaper", ..]
         | ["firewall", "schedule", ..]
         | ["firewall", "internet-service-name" | "internet-service-definition"]
+        // Définitions de libellés de catégories de services : métadonnée.
+        | ["firewall", "service", "category"]
         | ["firewall", "on-demand-sniffer"]
         | ["firewall", "proxy-address" | "proxy-addrgrp"]
         | ["web-proxy", ..]
@@ -3146,21 +3161,27 @@ mod tests {
             .any(|d| d.message.contains("ZONE-X") && d.message.contains("inconnue")));
     }
 
-    /// Les `config service` SD-WAN (sélection de membre par flux) ne sont
-    /// pas modélisés : diagnostic Warning EXPLICITE, fidélité dégradée —
-    /// la route multi-membres reste correcte au sens « l'un des WAN ».
+    /// Une règle `config service` SD-WAN choisit QUEL WAN, pas SI le
+    /// trafic passe : elle est RECONNUE (note Info) et ne dégrade PAS la
+    /// fidélité — le verdict d'accessibilité est identique quel que soit le
+    /// membre (les WAN sont évalués en ECMP).
     #[test]
-    fn regle_sdwan_service_non_modelisee_diagnostiquee() {
+    fn regle_sdwan_service_est_une_note_sans_degrader_la_fidelite() {
         let out = import(
             "config system sdwan\n    set status enable\n    config service\n        \
              edit 1\n            set priority-members 2 1\n        next\n    end\nend\n",
         );
-        let Fidelity::Partial { unsupported } = &out.fidelity else {
-            panic!("règle SD-WAN → fidélité dégradée");
-        };
-        assert!(unsupported.iter().any(|d| d
-            .message
-            .contains("règle SD-WAN 1 non modélisée : la sélection de membre par flux")));
+        assert!(
+            out.fidelity.is_complete(),
+            "la sélection de membre est sans effet sur le verdict : {:?}",
+            out.fidelity
+        );
+        assert!(
+            out.notes
+                .iter()
+                .any(|d| d.severity == Severity::Info
+                    && d.message.contains("règle SD-WAN 1 reconnue"))
+        );
     }
 
     /// Un membre SD-WAN sans passerelle route sur son interface (comme
