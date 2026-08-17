@@ -34,7 +34,7 @@ jobs:
             os: macos-latest
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -107,7 +107,7 @@ jobs:
             target: aarch64-unknown-linux-gnu
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -170,7 +170,7 @@ jobs:
     name: SBOM (SPDX)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Installer syft
         uses: anchore/sbom-action/download-syft@v0
       - name: Générer la nomenclature SPDX
@@ -191,7 +191,7 @@ jobs:
     needs: [build, paquets-linux, sbom]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - uses: actions/download-artifact@v4
         with:

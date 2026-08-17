@@ -27,7 +27,7 @@ jobs:
       matrix:
         cible: [parse_fortigate, parse_cisco_ios, import_fortigate]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Toolchain nightly
         uses: dtolnay/rust-toolchain@nightly
