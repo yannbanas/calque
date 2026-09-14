@@ -38,7 +38,7 @@ thiserror = { workspace = true }
 # Backend cryptographique `ring` plutôt que `aws-lc-rs` (le défaut) :
 # `ring` se compile sans cmake ni NASM sous Windows, où ce projet est
 # développé. Même niveau de maturité, choix purement build.
-russh = { version = "0.62", optional = true, default-features = false, features = [
+russh = { version = "0.63", optional = true, default-features = false, features = [
     "ring",
     "rsa",
     "flate2",
